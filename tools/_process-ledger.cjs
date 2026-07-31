@@ -8,6 +8,7 @@ const fs = require("node:fs");
 const childProcess = require("node:child_process");
 const { randomUUID } = require("node:crypto");
 const { syncBuiltinESMExports } = require("node:module");
+const { promisify } = require("node:util");
 const { isMainThread } = require("node:worker_threads");
 
 const ledgerPath = process.env.AGENT_OFFICE_TEST_PID_LEDGER;
@@ -44,6 +45,28 @@ function trackChild(child, command) {
   return child;
 }
 
+function trackedPromisifiedCall(target, name, args) {
+  let child;
+  const promise = new Promise((resolve, reject) => {
+    const callback = (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+      } else {
+        resolve({ stdout, stderr });
+      }
+    };
+    child = trackChild(
+      Reflect.apply(target, childProcess, [...args, callback]),
+      describeCall(name, args)
+    );
+  });
+  // Match Node's built-in promisified exec/execFile contract.
+  promise.child = child;
+  return promise;
+}
+
 // NODE_OPTIONS preloads this module inside Worker threads too. Workers share
 // their host process PID, so only the main thread may describe process lifetime.
 // Workers still patch child_process below so children they launch are tracked.
@@ -61,17 +84,25 @@ if (isMainThread) {
 
 for (const name of ["spawn", "exec", "execFile", "fork"]) {
   const original = childProcess[name];
-  childProcess[name] = new Proxy(original, {
-    apply(target, thisArgument, args) {
-      return trackChild(
-        Reflect.apply(target, thisArgument, args),
-        describeCall(name, args)
-      );
-    }
-  });
+  const trackedPromisify = original[promisify.custom]
+    ? (...args) => trackedPromisifiedCall(original, name, args)
+    : null;
+  const guarded = function guardedChildProcessCall(...args) {
+    return trackChild(
+      Reflect.apply(original, this, args),
+      describeCall(name, args)
+    );
+  };
+  Object.setPrototypeOf(guarded, Object.getPrototypeOf(original));
+  for (const property of Reflect.ownKeys(original)) {
+    if (["arguments", "caller", "prototype"].includes(property)) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(original, property);
+    if (property === promisify.custom && trackedPromisify) descriptor.value = trackedPromisify;
+    try { Object.defineProperty(guarded, property, descriptor); } catch { /* intrinsic metadata */ }
+  }
+  childProcess[name] = guarded;
 }
 
-// Keep `import { spawn } from "node:child_process"` aligned with the proxies
-// before application modules are evaluated. Proxy property access preserves
-// native metadata, including util.promisify.custom on exec/execFile.
+// Keep ESM named imports aligned with the guarded CommonJS exports before
+// application modules are evaluated.
 syncBuiltinESMExports();

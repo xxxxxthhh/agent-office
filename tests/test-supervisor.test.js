@@ -401,7 +401,9 @@ test("the process ledger preserves promisified execFile semantics", async (conte
     import { execFile } from "node:child_process";
     import { promisify } from "node:util";
     test("keeps the native result object", async () => {
-      const result = await promisify(execFile)(process.execPath, ["-e", "process.stdout.write('ok')"]);
+      const pending = promisify(execFile)(process.execPath, ["-e", "process.stdout.write('ok')"]);
+      assert.ok(pending.child?.pid > 0);
+      const result = await pending;
       assert.equal(result.stdout, "ok");
       assert.equal(result.stderr, "");
     });
@@ -418,16 +420,18 @@ test("the process ledger tracks a detached promisified execFile child", async (c
   context.after(() => rm(scratch, { recursive: true, force: true }));
   const marker = path.join(scratch, "detached.json");
   const hanging = path.join(scratch, "promisify-detached.test.mjs");
+  const python = [
+    "import json, os, time",
+    "os.setsid()",
+    `open(${JSON.stringify(marker)}, "w").write(json.dumps({"detachedPid": os.getpid()}))`,
+    "time.sleep(60)"
+  ].join("; ");
   await writeFile(hanging, `
     import test from "node:test";
     import { execFile } from "node:child_process";
-    import { writeFileSync } from "node:fs";
     import { promisify } from "node:util";
     test("hangs in a detached execFile", async () => {
-      await promisify(execFile)(process.execPath, ["-e", ${JSON.stringify(`
-        require("node:fs").writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ detachedPid: process.pid }));
-        setInterval(() => {}, 1000);
-      `)}], { detached: true });
+      await promisify(execFile)("/usr/bin/python3", ["-c", ${JSON.stringify(python)}]);
     });
   `);
   const markerPromise = waitForJson(marker);
