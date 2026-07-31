@@ -6,6 +6,16 @@
   "bin": {
     "agent-office": "./bin/agent-office.js"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "dashboard/",
+    "schemas/",
+    "docs/",
+    "examples/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "check": "node --check bin/agent-office.js && node --check src/capabilities.js && node --check src/server.js && node --check dashboard/app.js && node --test",
     "test": "node --test",

@@ -12,6 +12,10 @@ export class CodexAdapter {
 
   async runTurn({ prompt, workspace, timeoutMs, model, effort, signal, onProgress }) {
     const outputPath = this.store.createRunPath(this.agent.id, "codex.json");
+    // With --json the agent's reasoning, tool calls and notices live in the
+    // event stream, not in the final message. Keeping only the final message
+    // would leave the trace viewer with no evidence of what Codex actually did.
+    const eventsPath = `${outputPath.replace(/\.codex\.json$/, "")}.codex.jsonl`;
     const args = [
       ...(this.agent.commandArgs ?? []),
       "exec",
@@ -68,10 +72,16 @@ export class CodexAdapter {
     if (!finalText.trim() && envelopeSource) {
       await writeFile(outputPath, envelopeSource, "utf8");
     }
+    let tracePath = outputPath;
+    if (result.stdout.trim()) {
+      await writeFile(eventsPath, result.stdout, "utf8");
+      // The event stream contains the final message too, so it is the richer trace.
+      tracePath = eventsPath;
+    }
 
     return {
       response: parseTurnEnvelope(envelopeSource),
-      tracePath: outputPath,
+      tracePath,
       stderr: result.stderr,
       usage
     };

@@ -855,17 +855,30 @@ async function showWorkspaceDiff() {
       });
       return;
     }
+    const scoped = diff.scope === "task";
     const body = [
-      diff.stat || "(没有相对 HEAD 的改动)",
+      scoped
+        ? `本任务期间变化的文件（${diff.changedDuringTask.length}）：\n`
+          + (diff.changedDuringTask.join("\n") || "(无)")
+        : "该任务尚未运行过，没有基线，以下为整个工作区的当前改动。",
       "",
-      diff.status.length ? `未跟踪/已变更条目：\n${diff.status.join("\n")}` : "",
+      // Named explicitly so pre-task edits are never read as the task's work.
+      scoped && diff.preexisting.length
+        ? `任务开始前就已修改、至今未被改动（${diff.preexisting.length}）：\n${diff.preexisting.join("\n")}`
+        : "",
+      "",
+      diff.stat || "(没有相对基线的改动)",
       "",
       diff.patch || "(没有可显示的补丁)"
-    ].join("\n");
+    ].filter((part) => part !== "").join("\n");
     openDetail({
       eyebrow: "WORKSPACE DIFF",
-      title: "工作区改动",
-      note: `相对 HEAD${diff.truncated ? " · 补丁已截断" : ""}`,
+      title: scoped ? "本任务的工作区改动" : "工作区当前改动（全局）",
+      note: scoped
+        ? `基线 ${String(diff.baseline?.head ?? "无提交").slice(0, 12)} · `
+          + `记录于 ${relativeTime(diff.baseline?.capturedAt)}`
+          + `${diff.truncated ? " · 补丁已截断" : ""}`
+        : `相对 HEAD${diff.truncated ? " · 补丁已截断" : ""}`,
       body
     });
   } catch (error) {

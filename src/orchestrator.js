@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { AdapterError, ConfigError } from "./errors.js";
 import { createAdapters } from "./adapters/index.js";
 import { inventoryFromConfig, routeTask } from "./capabilities.js";
+import { captureBaseline } from "./workspace.js";
 import { nowIso, truncate } from "./utils.js";
 
 export class Orchestrator {
@@ -51,7 +52,10 @@ export class Orchestrator {
 
     // Held for the whole run so a second process cannot interleave turns on the
     // same task and the same workspace.
-    const lease = await this.store.acquireRunLease(taskId, runId);
+    const lease = await this.store.acquireRunLease(taskId, runId, {
+      workspace: this.config.workspace
+    });
+    await this.#ensureWorkspaceBaseline(taskId, task);
     try {
       task = await this.#runRounds(taskId, { maxRounds, onEvent, signal, runId });
     } finally {
@@ -62,6 +66,18 @@ export class Orchestrator {
       await this.store.pruneRunFiles?.().catch(() => {});
     }
     return task;
+  }
+
+  // Captured once, before the first turn touches anything, so the task's own
+  // changes can later be told apart from whatever was already in the tree.
+  async #ensureWorkspaceBaseline(taskId, task) {
+    if (task.workspaceBaseline !== undefined) return;
+    const baseline = await captureBaseline(this.config.workspace, {
+      stateDir: this.config.stateDir
+    }).catch(() => null);
+    await this.store.updateTask(taskId, "workspace.baseline", (current) => {
+      current.workspaceBaseline = baseline;
+    }, { head: baseline?.head ?? null, tracked: Object.keys(baseline?.files ?? {}).length });
   }
 
   async #runRounds(taskId, { maxRounds, onEvent, signal, runId }) {

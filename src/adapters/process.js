@@ -3,6 +3,26 @@ import { AdapterError } from "../errors.js";
 import { truncate } from "../utils.js";
 
 const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
+const KILL_GRACE_MS = 500;
+const FORCE_EXIT_MS = 2000;
+
+// Signals the child's whole process group. Falls back to the direct child when
+// the group is already gone or the platform has no process groups.
+function killTree(child, signal) {
+  if (!child.pid || child.killed && signal === "SIGTERM") {
+    try { child.kill(signal); } catch { /* already exited */ }
+    return;
+  }
+  if (process.platform === "win32") {
+    try { child.kill(signal); } catch { /* already exited */ }
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    try { child.kill(signal); } catch { /* already exited */ }
+  }
+}
 
 export function runProcess({
   command,
@@ -28,43 +48,61 @@ export function runProcess({
       cwd,
       env: { ...process.env, ...env },
       shell: false,
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
+      // Makes the child a process-group leader so the whole tree can be
+      // signalled. An agent CLI spawns shells and tools of its own; signalling
+      // only the direct child leaves those descendants writing to the workspace.
+      detached: process.platform !== "win32"
     });
 
     let stdout = "";
     let stderr = "";
     let settled = false;
     let outputLimitExceeded = false;
+    let termination = null;
+    let forceTimer = null;
 
     const timer = setTimeout(() => {
-      if (settled) return;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 500).unref();
-      finishReject(
-        new AdapterError(`Process timed out after ${timeoutMs} ms: ${command}`, {
-          command,
-          args,
-          stdout: truncate(stdout),
-          stderr: truncate(stderr),
-          timedOut: true
-        })
-      );
+      beginTermination({
+        message: `Process timed out after ${timeoutMs} ms: ${command}`,
+        extra: { timedOut: true }
+      });
     }, timeoutMs);
     timer.unref();
 
+    // Signals the whole process group, then settles only once the tree has
+    // actually exited — releasing a run lease while descendants are still alive
+    // would let the next run write the same files concurrently.
+    function beginTermination({ message, extra }) {
+      if (settled || termination) return;
+      termination = { message, extra };
+      killTree(child, "SIGTERM");
+      const escalate = setTimeout(() => killTree(child, "SIGKILL"), KILL_GRACE_MS);
+      escalate.unref();
+      forceTimer = setTimeout(() => {
+        // SIGKILL cannot be caught, so reaching here means a descendant is
+        // holding the pipes open. Report it rather than hanging forever.
+        finishReject(terminationError({ ...termination, unresponsive: true }));
+      }, KILL_GRACE_MS + FORCE_EXIT_MS);
+      forceTimer.unref();
+    }
+
+    function terminationError({ message, extra, unresponsive }) {
+      return new AdapterError(message, {
+        command,
+        args,
+        stdout: truncate(stdout),
+        stderr: truncate(stderr),
+        ...extra,
+        ...(unresponsive ? { treeUnresponsive: true } : {})
+      });
+    }
+
     const onAbort = () => {
-      if (settled) return;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 500).unref();
-      finishReject(
-        new AdapterError(`Run cancelled: ${command}`, {
-          command,
-          args,
-          stdout: truncate(stdout),
-          stderr: truncate(stderr),
-          cancelled: true
-        })
-      );
+      beginTermination({
+        message: `Run cancelled: ${command}`,
+        extra: { cancelled: true }
+      });
     };
     signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -110,6 +148,11 @@ export function runProcess({
 
     child.on("close", (code, signal) => {
       if (onStdoutLine && lineBuffer.trim()) emitLine(lineBuffer);
+      // The tree is gone; only now is it safe to report the cancellation.
+      if (termination) {
+        finishReject(terminationError(termination));
+        return;
+      }
       if (outputLimitExceeded) {
         finishReject(
           new AdapterError(`Process exceeded the ${MAX_CAPTURE_BYTES} byte output limit: ${command}`, {
@@ -160,6 +203,7 @@ export function runProcess({
 
     function cleanup() {
       clearTimeout(timer);
+      clearTimeout(forceTimer);
       signal?.removeEventListener("abort", onAbort);
     }
 

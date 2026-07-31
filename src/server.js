@@ -4,14 +4,13 @@ import { readFile as readFileAsync } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { RunLeaseError, TaskNotFoundError } from "./errors.js";
-import { runProcess } from "./adapters/process.js";
 import { PACKAGE_ROOT } from "./runtime.js";
+import { diffSince } from "./workspace.js";
 import { totalUsage } from "./usage.js";
 
 const DASHBOARD_ROOT = path.join(PACKAGE_ROOT, "dashboard");
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_TRACE_BYTES = 512 * 1024;
-const MAX_DIFF_BYTES = 512 * 1024;
 const STATIC_FILES = new Map([
   ["/", { path: path.join(DASHBOARD_ROOT, "index.html"), type: "text/html; charset=utf-8" }],
   ["/app.js", { path: path.join(DASHBOARD_ROOT, "app.js"), type: "text/javascript; charset=utf-8" }],
@@ -127,8 +126,15 @@ export class DashboardServer {
       /^\/api\/tasks\/(task-\d{8}-[a-f0-9]{8})\/diff$/
     );
     if (request.method === "GET" && diffMatch) {
-      await this.store.loadTask(diffMatch[1]);
-      return this.#json(response, 200, await this.#workspaceDiff());
+      const task = await this.store.loadTask(diffMatch[1]);
+      // Scoped to this task's own baseline, not the whole working tree.
+      return this.#json(
+        response,
+        200,
+        await diffSince(this.config.workspace, task.workspaceBaseline ?? null, {
+          stateDir: this.config.stateDir
+        })
+      );
     }
 
     if (request.method === "POST") {
@@ -178,6 +184,17 @@ export class DashboardServer {
           return this.#json(response, 409, {
             error: `Task is already being run by pid ${holder.pid} on ${holder.host}`,
             holder: publicLease(holder)
+          });
+        }
+        // Agents run one at a time per workspace, so a different task already
+        // running here blocks this one too.
+        const workspaceHolder = await this.store.readWorkspaceLease(this.config.workspace);
+        if (workspaceHolder?.alive && workspaceHolder.taskId !== taskId) {
+          return this.#json(response, 409, {
+            error: `另一个任务 ${workspaceHolder.taskId} 正在使用这个工作区`
+              + `（进程 ${workspaceHolder.pid}@${workspaceHolder.host}）。`
+              + "同一工作区同时只运行一个代理。",
+            holder: publicLease(workspaceHolder)
           });
         }
         const maxRounds = body.maxRounds === undefined
@@ -355,44 +372,6 @@ export class DashboardServer {
       truncated,
       contents: truncated ? contents.slice(0, MAX_TRACE_BYTES) : contents
     });
-  }
-
-  // Answers "what actually changed in the workspace", which is only knowable
-  // when the workspace is a git repository. The tool does not require one, so
-  // this reports unavailability instead of failing.
-  async #workspaceDiff() {
-    const git = (args) => runProcess({
-      command: "git",
-      args,
-      cwd: this.config.workspace,
-      timeoutMs: 10_000
-    });
-    try {
-      await git(["rev-parse", "--is-inside-work-tree"]);
-    } catch {
-      return {
-        available: false,
-        reason: "工作区不是 git 仓库，无法生成 diff。"
-      };
-    }
-    try {
-      const [status, stat, diff] = await Promise.all([
-        git(["status", "--porcelain"]),
-        git(["diff", "HEAD", "--stat"]),
-        git(["diff", "HEAD"])
-      ]);
-      const patch = diff.stdout;
-      return {
-        available: true,
-        status: status.stdout.trim().split("\n").filter(Boolean).slice(0, 200),
-        stat: stat.stdout.trim(),
-        patch: patch.length > MAX_DIFF_BYTES ? patch.slice(0, MAX_DIFF_BYTES) : patch,
-        truncated: patch.length > MAX_DIFF_BYTES
-      };
-    } catch (error) {
-      // A repository with no commits has no HEAD to diff against.
-      return { available: false, reason: `git 无法生成 diff：${error.message}` };
-    }
   }
 
   #serveEvents(request, response) {

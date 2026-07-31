@@ -260,7 +260,7 @@ agent-office run task-20260731-1a2b3c4d
 | --- | --- | --- |
 | `maxRounds` | `4` | 单次 `run` 最多推进的轮数。可被 `--rounds` 覆盖。 |
 | `transcriptMessages` | `40` | 注入提示词的最近可见消息条数。 |
-| `turnTimeoutMs` | `600000` | 单个代理回合的超时（毫秒）。超时会先发 `SIGTERM`，0.5 秒后 `SIGKILL`。 |
+| `turnTimeoutMs` | `600000` | 单个代理回合的超时（毫秒）。超时会向**整个进程组**先发 `SIGTERM`，0.5 秒后 `SIGKILL`。 |
 | `promptBudgetChars` | `120000` | 拼装后的对话记录字符上限。 |
 
 四者都必须是**正整数**。
@@ -477,11 +477,22 @@ CLI 端同样会打印进度，但只打印**工具调用和提示**两类——
 
 ### 7.7 工作区改动
 
-点击“工作区改动”会展示相对 `HEAD` 的：改动统计、`git status --porcelain` 条目列表（含未跟踪文件）、以及完整补丁（超过 512 KiB 会截断）。
+任务**第一次运行前**会记录一份工作区基线：当时的 `HEAD` 提交，以及当时已经改动/未跟踪的每个文件的内容哈希。
+
+点击“工作区改动”会基于这份基线区分：
+
+- **本任务期间变化的文件**——基线中不存在，或内容与基线时不同；
+- **任务开始前就已修改、至今未被改动**——明确排除在任务成果之外。
+
+另外展示相对基线提交的改动统计和完整补丁（超过 512 KiB 会截断）。
+
+如果任务还没运行过（没有基线），视图会标注为**全局**当前改动，而不是伪装成任务范围。
 
 **这依赖工作区是 git 仓库。** Agent Office 本身不要求 git（Codex 调用带 `--skip-git-repo-check`），所以在非 git 工作区里这个视图会明确告诉你无法生成，而不是报错。没有任何提交的新仓库同样无法生成（没有 `HEAD` 可比）。
 
 这是运行后回答“它到底改了什么”最直接的方式；产物列表只是代理的自述，diff 才是事实。
+
+注意基线是按**任务**记录的，不是按回合：多次运行同一任务，diff 覆盖的是这个任务从第一次运行至今的全部变化。
 
 ### 7.8 主题
 
@@ -667,16 +678,33 @@ defines [codex]. Restore the original roster or create a new task.
 
 ### 10.1 运行租约
 
-每次运行会在 `<stateDir>/leases/<task-id>.json` 写入一份**运行租约**，记录持有它的进程号、主机名、运行 ID、开始时间和心跳时间（每 5 秒更新）。
+每次运行会写入**两份租约**，都记录持有者的进程号、主机名、运行 ID、开始时间和心跳时间（每 5 秒更新）：
 
-租约保证**同一任务同时只有一个运行者**。第二个进程尝试运行同一任务会立即失败：
+| 租约 | 文件 | 保证 |
+| --- | --- | --- |
+| 任务级 | `<stateDir>/leases/<task-id>.json` | 同一任务同时只有一个运行者 |
+| 工作区级 | `<stateDir>/leases/workspace-<hash>.json` | **同一工作区同时只运行一个代理**（跨任务） |
+
+工作区级租约是必要的：只有任务级租约时，两个**不同**的任务共享同一个工作区仍可同时运行并互相覆盖文件，这与串行执行的承诺矛盾。哈希取工作区绝对路径，因此指向同一目录的两份配置会正确互斥。
+
+第二个进程尝试运行同一任务会立即失败：
 
 ```text
 Task task-20260731-905f3554 is already being run by pid 27573 on Mac.lan
 (started 2026-07-31T09:36:03.315Z). Stop that run before starting another.
 ```
 
-CLI 退出码为 `1`；控制台返回 HTTP `409`。
+另一个任务占用同一工作区时，报错指出占用者：
+
+```text
+Workspace /path/to/project is already in use by task task-20260731-1a2b3c4d
+(pid 27573 on Mac.lan, started 2026-07-31T09:36:03.315Z).
+Agents run one at a time per workspace; stop that run first.
+```
+
+两种情况下 CLI 退出码均为 `1`，控制台均返回 HTTP `409`。
+
+如果确实需要并行推进多个任务，给它们**各自独立的工作区**（不同的 `workspace`），而不是共享一个目录。
 
 ### 10.2 过期租约的判定
 
@@ -689,7 +717,9 @@ CLI 退出码为 `1`；控制台返回 HTTP `409`。
 
 ### 10.3 中断一次运行
 
-**CLI**：按 `Ctrl+C`。当前回合的子进程会被终止，租约释放，任务回到 `ready`，退出码 `130`。再按一次 `Ctrl+C` 强制退出。
+**CLI**：按 `Ctrl+C`。当前回合的**整个进程树**会被终止，租约释放，任务回到 `ready`，退出码 `130`。再按一次 `Ctrl+C` 强制退出。
+
+终止过程：向进程组发 `SIGTERM` → 0.5 秒后发 `SIGKILL` → **等待进程真正退出后**才释放租约并返回。代理 CLI 会自己派生 shell 和工具进程，只终止直接子进程会留下后代继续写工作区；等待退出则保证下一次运行不会与上一次的残留进程同时写同一批文件。
 
 **控制台**：点击“停止运行”。
 
@@ -778,6 +808,8 @@ rm <workspace>/<stateDir>/leases/<task-id>.json
 | --- | --- | --- | --- |
 | `claude` | `claude -p --output-format stream-json --verbose --json-schema …` | 事件流里的 `result` 事件（`structured_output`） | `assistant` 事件中的文本/工具/思考块 |
 | `codex` | `codex exec --json --output-schema … --output-last-message …` | `--output-last-message` 写出的文件 | `item.completed` / `turn.completed` 事件 |
+
+Codex 的 trace 保存的是**完整 JSONL 事件流**（`*.codex.jsonl`），而不只是最终消息——工具调用、提示等证据只存在于事件流里。最终消息另存为 `*.codex.json`。
 | `command` | 直接执行配置的程序 | stdout 全文 | 每一行 stdout |
 
 > `claude` 的 `--json-schema` 会拒绝无法按 URL 解析的 `$schema`，因此适配器在传参前会把它剥掉；`schemas/turn.schema.json` 本身保留该声明供 Codex 和文档使用。
@@ -847,7 +879,7 @@ Agent Office 依次尝试：直接解析 → 提取 Markdown 代码围栏中的 
 ├── events.jsonl.1      # 轮转后的上一代事件（超过 retention.maxEventFileBytes 时产生）
 ├── leases/             # 运行租约
 │   └── task-....json
-├── runs/               # 每次模型/命令调用的原始输出
+├── runs/               # 每次调用的原始输出（Codex 另存 *.codex.jsonl 事件流）
 └── tasks/
     └── task-....json   # 可恢复任务快照
 ```
