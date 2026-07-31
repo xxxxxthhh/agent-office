@@ -1,0 +1,18 @@
+{
+  "name": "agent-office",
+  "version": "0.3.0",
+  "description": "A local-first orchestration layer where coding agents collaborate on one shared task.",
+  "type": "module",
+  "bin": {
+    "agent-office": "./bin/agent-office.js"
+  },
+  "scripts": {
+    "check": "node --check bin/agent-office.js && node --check src/capabilities.js && node --check src/server.js && node --check dashboard/app.js && node --test",
+    "test": "node --test",
+    "demo": "node ./bin/agent-office.js demo"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

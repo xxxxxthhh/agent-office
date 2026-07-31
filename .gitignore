@@ -1,0 +1,10 @@
+.agent-office/
+.agent-office-*/
+node_modules/
+.DS_Store
+coverage/
+output/
+
+# Local editor/agent settings and build artifacts
+.claude/
+*.tgz

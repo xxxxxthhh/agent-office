@@ -1,0 +1,7 @@
+Checking MCP server health…
+
+claude.ai S&P Example: https://mcp.example.com/integrations/mcp - ! Needs authentication
+claude.ai Drive: https://drivemcp.example.com/mcp/v1 - ! Needs authentication
+figma: https://mcp.figma.com/mcp - ✓ Connected
+local-tools: node /opt/tools/server.js - ✓ Connected
+broken-server: node /opt/tools/missing.js - ✗ Failed to connect

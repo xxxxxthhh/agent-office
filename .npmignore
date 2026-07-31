@@ -1,0 +1,6 @@
+.agent-office/
+.agent-office-*/
+coverage/
+output/
+*.tgz
+.DS_Store
