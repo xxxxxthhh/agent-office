@@ -26,6 +26,7 @@ export class TaskStore {
     this.tasksDir = path.join(this.stateDir, "tasks");
     this.runsDir = path.join(this.stateDir, "runs");
     this.leasesDir = path.join(this.stateDir, "leases");
+    this.baselinesDir = path.join(this.stateDir, "baselines");
     this.eventsPath = path.join(this.stateDir, "events.jsonl");
     this.lockPath = path.join(this.stateDir, ".write-lock");
     this.lockTimeoutMs = options.lockTimeoutMs ?? 5000;
@@ -44,6 +45,7 @@ export class TaskStore {
     await mkdir(this.tasksDir, { recursive: true });
     await mkdir(this.runsDir, { recursive: true });
     await mkdir(this.leasesDir, { recursive: true });
+    await mkdir(this.baselinesDir, { recursive: true });
   }
 
   async createTask(objective, agents, metadata = {}) {
@@ -303,16 +305,16 @@ export class TaskStore {
       }
     }
 
-    const heartbeats = [
-      { write: (lease) => this.#writeLeaseAtomic(taskId, lease), lease: taskLease },
-      ...(workspaceLock
-        ? [{ write: (lease) => atomicWrite(workspaceLock.path, lease), lease: workspaceLock.lease }]
-        : [])
-    ];
+    // Rewriting blindly would let a holder whose lock was superseded stomp the
+    // new owner's file; refresh only what is verifiably still ours.
+    const refresh = async (filePath, lease) => {
+      const current = await this.#assessLease(filePath);
+      if (current && current.runId !== lease.runId) return;
+      await atomicWrite(filePath, { ...lease, heartbeatAt: nowIso() });
+    };
     const timer = setInterval(() => {
-      for (const beat of heartbeats) {
-        beat.write({ ...beat.lease, heartbeatAt: nowIso() }).catch(() => {});
-      }
+      refresh(this.#leasePath(taskId), taskLease).catch(() => {});
+      if (workspaceLock) refresh(workspaceLock.path, workspaceLock.lease).catch(() => {});
     }, this.leaseHeartbeatMs);
     timer.unref();
 
@@ -336,11 +338,21 @@ export class TaskStore {
   }
 
   // The stateDir #withLock cannot serialize configs with different stateDirs,
-  // so the workspace lock relies on the atomicity of exclusive create instead:
-  // whoever wins the O_EXCL open owns the workspace.
+  // so the workspace lock relies on filesystem atomicity alone. Two operations
+  // are atomic and are the only ones used to change ownership:
+  //   - O_EXCL create, for the uncontended path;
+  //   - mkdir of a takeover mutex, to serialize stale-lock takeover. Takeover
+  //     previously did assess -> rm -> create, and two processes that both saw
+  //     the stale lock could interleave so that the second rm deleted the
+  //     winner's *fresh* lock — double acquisition. Inside the mutex the stale
+  //     file is replaced via temp+rename, so the path never has a free window,
+  //     and a read-back verifies ownership before the mutex is released.
   async #acquireWorkspaceLock(canonicalWorkspace, makeLease) {
     const lockPath = path.join(canonicalWorkspace, WORKSPACE_LOCK_NAME);
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    const mutexPath = `${lockPath}.takeover`;
+    const deadline = Date.now() + this.lockTimeoutMs;
+
+    while (Date.now() < deadline) {
       const lease = makeLease("workspace", canonicalWorkspace);
       try {
         await writeFile(lockPath, JSON.stringify(lease), { flag: "wx" });
@@ -348,6 +360,7 @@ export class TaskStore {
       } catch (error) {
         if (error.code !== "EEXIST") throw error;
       }
+
       const existing = await this.#assessLease(lockPath);
       if (existing?.alive) {
         throw new RunLeaseError(
@@ -357,11 +370,64 @@ export class TaskStore {
           existing
         );
       }
-      // Stale or unreadable: clear it and race for the exclusive create again.
-      await rm(lockPath, { force: true });
+      if (existing === null) {
+        // The lock disappeared between the failed create and the assessment;
+        // race for the exclusive create again.
+        continue;
+      }
+
+      // Stale lock: take the takeover mutex. mkdir is atomic, so exactly one
+      // contender enters; the rest wait and re-assess (they will usually find
+      // the winner's fresh lock and throw above on the next iteration).
+      try {
+        await mkdir(mutexPath);
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        // A mutex older than the stale threshold belongs to a takeover that
+        // died mid-flight; clear it and retry. (rmdir of a fresh mutex by a
+        // slow observer is theoretically possible but requires a crashed
+        // takeover plus a microsecond interleave; the read-back below still
+        // resolves any resulting race to a single owner.)
+        const mutexInfo = await stat(mutexPath).catch(() => null);
+        if (mutexInfo && Date.now() - mutexInfo.mtimeMs > this.staleLeaseMs) {
+          await rmdir(mutexPath).catch(() => {});
+        }
+        await sleep(25);
+        continue;
+      }
+
+      try {
+        // Re-assess inside the mutex: the lock may have been taken over while
+        // this contender was waiting to enter.
+        const current = await this.#assessLease(lockPath);
+        if (current?.alive) {
+          throw new RunLeaseError(
+            `Workspace ${canonicalWorkspace} is already in use by task ${current.taskId} `
+            + `(pid ${current.pid} on ${current.host}, started ${current.startedAt}). `
+            + "Agents run one at a time per workspace; stop that run first.",
+            current
+          );
+        }
+        // Replace the stale file in place — never rm + create, which would
+        // open a window where the path is free for a concurrent O_EXCL create.
+        await atomicWrite(lockPath, lease);
+        // Read-back: if any racer replaced after us, concede to them.
+        await sleep(30);
+        const verified = await this.#assessLease(lockPath);
+        if (verified?.runId !== lease.runId) {
+          throw new RunLeaseError(
+            `Workspace ${canonicalWorkspace} was claimed by a concurrent run while `
+            + "taking over a stale lock; not proceeding.",
+            verified ?? undefined
+          );
+        }
+        return { path: lockPath, lease };
+      } finally {
+        await rmdir(mutexPath).catch(() => {});
+      }
     }
     throw new RunLeaseError(
-      `Could not acquire the workspace lock at ${lockPath} after repeated attempts.`
+      `Could not acquire the workspace lock at ${lockPath} within ${this.lockTimeoutMs} ms.`
     );
   }
 
@@ -454,18 +520,23 @@ export class TaskStore {
   // removes it. Oldest files go first once the cap is exceeded.
   async pruneRunFiles() {
     await this.init();
-    const names = await readdir(this.runsDir).catch(() => []);
-    if (names.length <= this.maxRunFiles) return 0;
-    const entries = [];
-    for (const name of names) {
-      const filePath = path.join(this.runsDir, name);
-      const info = await stat(filePath).catch(() => null);
-      if (info?.isFile()) entries.push({ filePath, mtimeMs: info.mtimeMs });
+    let removed = 0;
+    // Baseline blobs accumulate like raw run output does; same cap, same policy.
+    for (const dir of [this.runsDir, this.baselinesDir]) {
+      const names = await readdir(dir).catch(() => []);
+      if (names.length <= this.maxRunFiles) continue;
+      const entries = [];
+      for (const name of names) {
+        const filePath = path.join(dir, name);
+        const info = await stat(filePath).catch(() => null);
+        if (info?.isFile()) entries.push({ filePath, mtimeMs: info.mtimeMs });
+      }
+      entries.sort((left, right) => left.mtimeMs - right.mtimeMs);
+      const excess = entries.slice(0, Math.max(0, entries.length - this.maxRunFiles));
+      for (const entry of excess) await rm(entry.filePath, { force: true });
+      removed += excess.length;
     }
-    entries.sort((left, right) => left.mtimeMs - right.mtimeMs);
-    const excess = entries.slice(0, Math.max(0, entries.length - this.maxRunFiles));
-    for (const entry of excess) await rm(entry.filePath, { force: true });
-    return excess.length;
+    return removed;
   }
 
   async setArchived(taskId, archived) {

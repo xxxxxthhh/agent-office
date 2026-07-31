@@ -132,7 +132,8 @@ export class DashboardServer {
         response,
         200,
         await diffSince(this.config.workspace, task.workspaceBaseline ?? null, {
-          stateDir: this.config.stateDir
+          stateDir: this.config.stateDir,
+          blobDir: this.store.baselinesDir
         })
       );
     }

@@ -75,7 +75,8 @@ export class Orchestrator {
   async #ensureWorkspaceBaseline(taskId, task) {
     if (task.workspaceBaseline !== undefined) return;
     const baseline = await captureBaseline(this.config.workspace, {
-      stateDir: this.config.stateDir
+      stateDir: this.config.stateDir,
+      blobDir: this.store.baselinesDir
     }).catch(() => null);
     await this.store.updateTask(taskId, "workspace.baseline", (current) => {
       current.workspaceBaseline = baseline;

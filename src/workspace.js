@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { runProcess } from "./adapters/process.js";
 import { WORKSPACE_LOCK_NAME } from "./store.js";
 
 const GIT_TIMEOUT_MS = 10_000;
 const MAX_TRACKED_FILES = 500;
 const MAX_DIFF_BYTES = 512 * 1024;
+// Dirty files up to this size get a content snapshot at baseline time, so a
+// later patch can show only the task's delta on top of the pre-task content.
+const BASELINE_BLOB_MAX_BYTES = 1024 * 1024;
 
 async function git(workspace, args) {
   return runProcess({ command: "git", args, cwd: workspace, timeoutMs: GIT_TIMEOUT_MS });
@@ -32,31 +35,53 @@ export async function isGitWorkspace(workspace) {
   }
 }
 
-// Records what the workspace looked like before a task first ran, so its diff
-// can later be separated from changes that were already there. Without this a
-// "task diff" is just the global working-tree diff and says nothing about the
-// task.
-export async function captureBaseline(workspace, { stateDir } = {}) {
+// Records what the workspace looked like before a task first ran: the HEAD
+// commit, and for every already-dirty file both a content hash and (when a
+// blob directory is available and the file is not huge) a content snapshot.
+// The hash alone can classify a file as task-changed, but only the snapshot
+// can later produce a patch that excludes the pre-task content.
+export async function captureBaseline(workspace, { stateDir, blobDir } = {}) {
   if (!(await isGitWorkspace(workspace))) return null;
   const head = await git(workspace, ["rev-parse", "HEAD"])
     .then((result) => result.stdout.trim())
     // A repository with no commits has no HEAD to diff against.
     .catch(() => null);
+  const files = await hashDirtyFiles(workspace, stateDir);
+  if (blobDir) {
+    await mkdir(blobDir, { recursive: true }).catch(() => {});
+    for (const [file, hash] of Object.entries(files)) {
+      if (hash === "absent") continue;
+      const source = path.join(workspace, file);
+      const target = path.join(blobDir, hash);
+      try {
+        const contents = await readFile(source);
+        if (contents.byteLength <= BASELINE_BLOB_MAX_BYTES) {
+          await writeFile(target, contents, { flag: "wx" }).catch((error) => {
+            // Content-addressed: an existing blob with this hash is this blob.
+            if (error.code !== "EEXIST") throw error;
+          });
+        }
+      } catch {
+        // Snapshot is best-effort; the hash still classifies the file.
+      }
+    }
+  }
   return {
     head,
     capturedAt: new Date().toISOString(),
-    files: await hashDirtyFiles(workspace, stateDir)
+    files
   };
 }
 
 // The task's diff must be consistent with itself: the file list and the patch
-// describe the same set of files. Three rules make that hold:
-//   - pre-task dirty files that the task never touched are excluded from BOTH;
-//   - files the task committed still count (the working tree being clean does
-//     not mean the task changed nothing);
-//   - untracked files the task created appear in the patch via --no-index,
-//     since `git diff` alone never shows them.
-export async function diffSince(workspace, baseline, { stateDir } = {}) {
+// describe the same set of files, and the patch shows ONLY what changed during
+// the task:
+//   - pre-task dirty files the task never touched are excluded from both;
+//   - a pre-task dirty file the task DID touch is diffed against its baseline
+//     snapshot, so the user's pre-task edit does not leak into the task patch;
+//   - files the task committed still count;
+//   - untracked files the task created appear via --no-index.
+export async function diffSince(workspace, baseline, { stateDir, blobDir } = {}) {
   if (!(await isGitWorkspace(workspace))) {
     return { available: false, reason: "工作区不是 git 仓库，无法生成 diff。" };
   }
@@ -103,18 +128,44 @@ export async function diffSince(workspace, baseline, { stateDir } = {}) {
     let patch = "";
     let stat = "";
     if (baseline && changedDuringTask.length) {
-      const tracked = changedDuringTask.filter((file) => !untrackedNow.has(file));
-      const diffBase = baseline.head ?? currentHead;
-      if (tracked.length && diffBase) {
-        stat = await gitDiffOutput(workspace, ["diff", diffBase, "--stat", "--", ...tracked]);
-        patch = await gitDiffOutput(workspace, ["diff", diffBase, "--", ...tracked]);
-      }
+      const headBased = [];
       for (const file of changedDuringTask) {
-        if (!untrackedNow.has(file)) continue;
-        patch += await gitDiffOutput(
-          workspace,
-          ["diff", "--no-index", "--", "/dev/null", file]
-        );
+        // A pre-task dirty file: its head-diff would mix the user's pre-task
+        // edit with the task's; diff against the baseline snapshot instead.
+        const blobPath = blobDir && file in base && base[file] !== "absent"
+          ? path.join(blobDir, base[file])
+          : null;
+        const hasBlob = blobPath && await readFile(blobPath).then(() => true).catch(() => false);
+        if (hasBlob) {
+          // The task may also have deleted the file entirely.
+          const target = current[file] === "absent" ? "/dev/null" : file;
+          const filePatch = await gitDiffOutput(
+            workspace,
+            ["diff", "--no-index", "--", blobPath, target]
+          );
+          patch += relabel(filePatch, blobPath, file);
+          stat += `${file} | changed during the task (vs pre-task snapshot)\n`;
+        } else if (untrackedNow.has(file)) {
+          patch += await gitDiffOutput(
+            workspace,
+            ["diff", "--no-index", "--", "/dev/null", file]
+          );
+          stat += `${file} | new file\n`;
+        } else {
+          headBased.push(file);
+          // Pre-dirty but no snapshot survives (legacy task or oversized file):
+          // the head-diff below unavoidably includes the pre-task edit. Say so
+          // instead of presenting it as pure task output.
+          if (file in base) {
+            stat += `${file} | WARNING: no baseline snapshot; the patch below may `
+              + "include pre-task edits\n";
+          }
+        }
+      }
+      const diffBase = baseline.head ?? currentHead;
+      if (headBased.length && diffBase) {
+        stat += await gitDiffOutput(workspace, ["diff", diffBase, "--stat", "--", ...headBased]);
+        patch += await gitDiffOutput(workspace, ["diff", diffBase, "--", ...headBased]);
       }
     } else if (!baseline) {
       // No baseline: an honest global view rather than a fake task view.
@@ -144,6 +195,12 @@ export async function diffSince(workspace, baseline, { stateDir } = {}) {
   }
 }
 
+// --no-index prints the blob's real path in the headers; label the patch with
+// the workspace-relative file it describes instead.
+function relabel(filePatch, blobPath, file) {
+  return filePatch.replaceAll(blobPath, file);
+}
+
 async function headOf(workspace) {
   return git(workspace, ["rev-parse", "HEAD"])
     .then((result) => result.stdout.trim())
@@ -170,19 +227,38 @@ async function hashDirtyFiles(workspace, stateDir) {
   } catch {
     return hashes;
   }
-  const entries = status.stdout.split("\0").filter(Boolean).slice(0, MAX_TRACKED_FILES);
-  for (const entry of entries) {
-    // Porcelain format is "XY <path>"; renames carry a second path we skip.
+  // NUL-separated porcelain: `XY PATH` records, but a rename/copy carries the
+  // ORIGIN as an extra NUL-separated field. Splitting blindly would read that
+  // origin as its own record and mangle it with slice(3).
+  const tokens = status.stdout.split("\0");
+  let recorded = 0;
+  for (let index = 0; index < tokens.length && recorded < MAX_TRACKED_FILES; index += 1) {
+    const entry = tokens[index];
+    if (!entry) continue;
+    const xy = entry.slice(0, 2);
     const file = entry.slice(3).trim();
     if (!file) continue;
-    if (isInternal(file, ignored)) continue;
-    hashes[file] = await hashFile(path.join(workspace, file));
+    let origin = null;
+    if (xy.includes("R") || xy.includes("C")) {
+      index += 1;
+      origin = (tokens[index] ?? "").trim() || null;
+    }
+    if (!isInternal(file, ignored)) {
+      hashes[file] = await hashFile(path.join(workspace, file));
+      recorded += 1;
+    }
+    // The origin path of a rename no longer exists; recording it as absent
+    // lets the diff attribute the disappearance (and show the deletion).
+    if (origin && !isInternal(origin, ignored)) {
+      hashes[origin] = await hashFile(path.join(workspace, origin));
+      recorded += 1;
+    }
   }
   return hashes;
 }
 
-// Agent Office's own bookkeeping — the state directory and the workspace lock
-// file — must never show up as "changes" in anyone's diff.
+// Agent Office's own bookkeeping — the state directory, the workspace lock and
+// its takeover mutex — must never show up as "changes" in anyone's diff.
 function ignoredPrefixes(workspace, stateDir) {
   const prefixes = [];
   if (stateDir) {
@@ -191,7 +267,10 @@ function ignoredPrefixes(workspace, stateDir) {
       prefixes.push(`${relative}/`);
     }
   }
-  return { prefixes, names: new Set([WORKSPACE_LOCK_NAME]) };
+  return {
+    prefixes,
+    names: new Set([WORKSPACE_LOCK_NAME, `${WORKSPACE_LOCK_NAME}.takeover`])
+  };
 }
 
 function isInternal(file, ignored) {

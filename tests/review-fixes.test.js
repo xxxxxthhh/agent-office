@@ -446,3 +446,86 @@ test("the workspace lock file never appears in a task diff", async (context) => 
   assert.deepEqual(diff.changedDuringTask, ["real-change.txt"]);
   assert.equal(diff.patch.includes(WORKSPACE_LOCK_NAME), false);
 });
+
+// --- Round 3: escalated findings against the second round --------------------
+
+test("concurrent stale-lock takeover yields exactly one owner (TOCTOU)", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-toctou-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const { WORKSPACE_LOCK_NAME } = await import("../src/store.js");
+  const lockPath = path.join(workspace, WORKSPACE_LOCK_NAME);
+  const CONTENDERS = 6;
+  const stores = [];
+  for (let index = 0; index < CONTENDERS; index += 1) {
+    const store = new TaskStore(path.join(workspace, `.state${index}`));
+    await store.init();
+    stores.push(store);
+  }
+  const staleLock = () => JSON.stringify({
+    taskId: "task-20260101-deadbeef", runId: "crashed", kind: "workspace",
+    workspace, pid: 2147483646, host: os.hostname(),
+    startedAt: "2020-01-01T00:00:00.000Z", heartbeatAt: "2020-01-01T00:00:00.000Z"
+  });
+
+  // The old takeover (assess -> rm -> create) double-acquired within a handful
+  // of attempts: the second rm deleted the winner's fresh lock.
+  for (let attempt = 1; attempt <= 25; attempt += 1) {
+    await rm(lockPath, { force: true }).catch(() => {});
+    await writeFile(lockPath, staleLock());
+    const results = await Promise.allSettled(stores.map((store, index) => (
+      store.acquireRunLease(`task-20260101-0000000${index}`, `run-${attempt}-${index}`, { workspace })
+    )));
+    const winners = results.filter((result) => result.status === "fulfilled");
+    assert.equal(
+      winners.length,
+      1,
+      `attempt ${attempt}: ${winners.length} contenders acquired the same workspace`
+    );
+    for (const winner of winners) await winner.value.release();
+  }
+});
+
+test("a task edit to a pre-dirty file does not leak pre-task content into the patch", async (context) => {
+  const { workspace } = await gitWorkspace(context);
+  const blobDir = path.join(workspace, ".state", "baselines");
+  // Pre-task user edit on a tracked file...
+  await writeFile(path.join(workspace, "tracked.txt"), "baseline\nuser-before-task\n");
+  const baseline = await captureBaseline(workspace, {
+    stateDir: path.join(workspace, ".state"),
+    blobDir
+  });
+  // ...then the task edits the SAME file.
+  await writeFile(path.join(workspace, "tracked.txt"), "baseline\nuser-before-task\ntask-change\n");
+
+  const diff = await diffSince(workspace, baseline, {
+    stateDir: path.join(workspace, ".state"),
+    blobDir
+  });
+
+  assert.deepEqual(diff.changedDuringTask, ["tracked.txt"]);
+  assert.ok(diff.patch.includes("+task-change"), "the task's own edit is in the patch");
+  assert.equal(
+    diff.patch.includes("+user-before-task"),
+    false,
+    "the user's pre-task edit leaked into the task patch"
+  );
+});
+
+test("an uncommitted rename is reported with both real paths", async (context) => {
+  const { workspace, git } = await gitWorkspace(context);
+  await writeFile(path.join(workspace, "before-name.txt"), "content\n");
+  await git(["add", "-A"]);
+  await git(["commit", "-qm", "add before-name"]);
+  const baseline = await captureBaseline(workspace);
+  await git(["mv", "before-name.txt", "after-name.txt"]);
+
+  const diff = await diffSince(workspace, baseline);
+
+  // The -z porcelain rename record carries the origin as a second NUL field;
+  // parsing it as a standalone record produced the mangled "ore-name.txt".
+  assert.deepEqual(diff.changedDuringTask, ["after-name.txt", "before-name.txt"]);
+  assert.ok(
+    diff.patch.includes("before-name.txt"),
+    "the old path's disappearance is missing from the patch"
+  );
+});
