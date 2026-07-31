@@ -55,6 +55,7 @@ function appendRunnerToLedger() {
       event: "start",
       pid: child.pid,
       ppid: process.pid,
+      instanceId: `supervisor:${runToken}`,
       command: "node --test"
     })}\n`, { encoding: "utf8", mode: 0o600, flag: "a" });
   } catch {
@@ -70,8 +71,15 @@ function readOwnedProcesses() {
       if (!line) continue;
       let entry;
       try { entry = JSON.parse(line); } catch { continue; }
-      if (entry.token !== runToken || !Number.isInteger(entry.pid) || entry.pid <= 0) continue;
-      if (entry.event === "stop") active.delete(entry.pid);
+      if (
+        entry.token !== runToken
+        || !Number.isInteger(entry.pid)
+        || entry.pid <= 0
+        || typeof entry.instanceId !== "string"
+      ) continue;
+      if (entry.event === "stop" && active.get(entry.pid)?.instanceId === entry.instanceId) {
+        active.delete(entry.pid);
+      }
       else if (entry.event === "start") active.set(entry.pid, entry);
     }
   } catch {
@@ -79,7 +87,12 @@ function readOwnedProcesses() {
     // process-group fallback.
   }
   if (Number.isInteger(child.pid) && child.pid > 0 && !active.has(child.pid)) {
-    active.set(child.pid, { pid: child.pid, ppid: process.pid, command: "node --test" });
+    active.set(child.pid, {
+      pid: child.pid,
+      ppid: process.pid,
+      instanceId: `supervisor:${runToken}`,
+      command: "node --test"
+    });
   }
   // Later starts are normally deeper descendants; signal them first.
   return [...active.values()].reverse();
@@ -92,6 +105,10 @@ function signalPid(pid, signal) {
 function signalOwnedProcesses(signal) {
   if (!child.pid) return;
   if (process.platform === "win32") {
+    // Windows has no Unix process-group liveness probe. Terminate every
+    // registered PID first so detached entries are not lost when the runner
+    // has already exited, then ask taskkill to cover its ordinary tree.
+    for (const entry of readOwnedProcesses()) signalPid(entry.pid, "SIGKILL");
     execFile("taskkill", ["/pid", String(child.pid), "/T", "/F"], { timeout: 4000 }, () => {});
     return;
   }

@@ -55,24 +55,31 @@ test("cancellation settles only after the tree has exited", async (context) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-tree-wait-"));
   context.after(() => rm(workspace, { recursive: true, force: true }));
   const agent = path.join(workspace, "stubborn.cjs");
+  const ready = path.join(workspace, "stubborn.ready");
   // Ignores SIGTERM, so settling early would mean reporting "stopped" while the
   // process is still alive and still able to write.
   await writeFile(agent, `
     process.on("SIGTERM", () => {});
+    require("node:fs").writeFileSync(${JSON.stringify(ready)}, "ready");
     process.stdin.resume();
     setInterval(() => {}, 1000);
   `);
 
   const controller = new AbortController();
-  const startedAt = Date.now();
-  setTimeout(() => controller.abort(), 50);
-  await assert.rejects(() => runProcess({
+  const running = runProcess({
     command: process.execPath,
     args: [agent],
     cwd: workspace,
     signal: controller.signal,
     timeoutMs: 15_000
-  }), (error) => {
+  });
+  for (let attempt = 0; attempt < 200 && !existsSync(ready); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(existsSync(ready), true, "stubborn child never installed its SIGTERM handler");
+  const startedAt = Date.now();
+  controller.abort();
+  await assert.rejects(running, (error) => {
     assert.equal(error.details.cancelled, true);
     return true;
   });

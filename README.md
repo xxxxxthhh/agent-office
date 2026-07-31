@@ -293,6 +293,6 @@ npm run check
 
 项目只使用 Node.js 内置模块，因此不需要 `npm install`。
 
-测试有两层挂起防护：每个测试文件内置句柄看门狗（worker 存活超过 120 秒即打印持有句柄并失败退出），整个 `node --test` 运行由 `tools/run-tests.mjs` 从外部监督（默认 240 秒死线，`AGENT_OFFICE_TEST_DEADLINE_MS` 可调）。supervisor 为每次运行注入唯一 PID ledger：Node 后代会自登记，Node 发起的直接子进程也会在 spawn 时登记，所以清理不依赖 `ps`，launcher 退出、后代被重新挂到 PID 1 或另建进程组后仍可定位；正常完成同样会清理登记进程。超时打印 ledger 中的存活进程、强制清理并以 124 退出；`SIGINT`/`SIGTERM` 会先转发、再升级清理，连续信号也不会绕过 supervisor。发布包包含这套测试，并通过真实打包安装回归确认 `npm test` 至少执行一个测试，不会以零测试假绿。任何防护触发都是确定性失败，而不是静默等待。
+测试有两层挂起防护：每个测试文件内置句柄看门狗（worker 存活超过 120 秒即打印持有句柄并失败退出），整个 `node --test` 运行由 `tools/run-tests.mjs` 从外部监督（默认 240 秒死线，`AGENT_OFFICE_TEST_DEADLINE_MS` 可调）。supervisor 为每次运行注入唯一 PID ledger：Node 后代会按进程实例自登记，Node（含 Worker thread）发起的直接子进程也会在 spawn 时登记，所以清理不依赖 `ps`，launcher 退出、后代被重新挂到 PID 1 或另建进程组后仍可定位；正常完成同样会清理登记进程。超时打印 ledger 中的存活进程、强制清理并以 124 退出；`SIGINT`/`SIGTERM` 会先转发、再升级清理，连续信号也不会绕过 supervisor。Windows 使用登记 PID 强制终止再辅以 `taskkill /T`，但本项目只在 macOS 验证过该轮回归。进程实例 ID 可防止延迟 stop 误删新记录；若进程异常消失后 OS 在同一次短测试内立刻复用其 PID，缺少 job object/pidfd 的平台仍无法从 PID 本身证明代际。发布包包含这套测试，并通过真实打包安装回归确认 `npm test` 至少执行一个测试，不会以零测试假绿。任何防护触发都是确定性失败，而不是静默等待。
 
 更多设计说明见 [架构文档](docs/architecture.md) 和 [协作协议](docs/protocol.md)。

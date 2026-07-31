@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SUPERVISOR = path.resolve(
@@ -21,7 +21,12 @@ const runCommand = (command, args, options = {}) => new Promise((resolve) => {
     maxBuffer: 4 * 1024 * 1024,
     ...options
   }, (error, stdout, stderr) => {
-    resolve({ code: error?.code ?? 0, stdout, stderr });
+    resolve({
+      code: error ? (typeof error.code === "number" ? error.code : 1) : 0,
+      signal: error?.signal ?? null,
+      stdout,
+      stderr
+    });
   });
 });
 
@@ -270,20 +275,52 @@ test("a successful test run still cleans up an unrefed detached child", async (c
   assert.equal(isAlive(ids.detachedPid), false, "a green test run leaked a detached child");
 });
 
+test("a Worker exit cannot erase its detached host process from the ledger", async (context) => {
+  if (process.platform === "win32") return;
+  const scratch = await mkdtemp(path.join(os.tmpdir(), "agent-office-supervisor-worker-pid-"));
+  context.after(() => rm(scratch, { recursive: true, force: true }));
+  const marker = path.join(scratch, "detached.json");
+  const detachedProgram = path.join(scratch, "detached-worker.mjs");
+  const hanging = path.join(scratch, "worker-pid.test.mjs");
+  await writeFile(detachedProgram, `
+    import { writeFileSync } from "node:fs";
+    import { Worker } from "node:worker_threads";
+    const worker = new Worker("void 0", { eval: true });
+    worker.once("exit", () => {
+      writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ detachedPid: process.pid }));
+      setInterval(() => {}, 1000);
+    });
+  `);
+  await writeFile(hanging, `
+    import test from "node:test";
+    import { spawn } from "node:child_process";
+    const detached = spawn(process.execPath, [${JSON.stringify(detachedProgram)}], {
+      detached: true,
+      stdio: "ignore"
+    });
+    detached.unref();
+    test("hangs forever", () => new Promise(() => { setInterval(() => {}, 1000); }));
+  `);
+  const markerPromise = waitForJson(marker);
+  const resultPromise = runSupervisor(
+    ["--test-timeout=600000", hanging],
+    { AGENT_OFFICE_TEST_DEADLINE_MS: "2500" }
+  );
+  const ids = await markerPromise;
+  context.after(() => stopOwnedProcess(ids.detachedPid));
+
+  const result = await resultPromise;
+
+  assert.equal(result.code, 124);
+  assert.equal(isAlive(ids.detachedPid), false, "a Worker stop event hid its live host process");
+});
+
 test("a repeated SIGINT cannot bypass asynchronous cleanup", async (context) => {
   if (process.platform === "win32") return;
   const scratch = await mkdtemp(path.join(os.tmpdir(), "agent-office-supervisor-repeat-signal-"));
   context.after(() => rm(scratch, { recursive: true, force: true }));
   const marker = path.join(scratch, "pids.json");
-  const psMarker = path.join(scratch, "ps-pid.json");
-  const fakePs = path.join(scratch, "ps");
   const hanging = path.join(scratch, "signal.test.mjs");
-  await writeFile(fakePs, `#!/bin/sh
-printf '%s' "$$" > ${JSON.stringify(psMarker)}
-trap '' TERM
-/bin/sleep 10
-`);
-  await chmod(fakePs, 0o755);
   await writeFile(hanging, `
     import test from "node:test";
     import { writeFileSync } from "node:fs";
@@ -297,17 +334,15 @@ trap '' TERM
   const supervisor = spawn(process.execPath, [SUPERVISOR, hanging], {
     env: {
       ...process.env,
-      AGENT_OFFICE_TEST_DEADLINE_MS: "60000",
-      PATH: `${scratch}:/bin:/usr/bin`
+      AGENT_OFFICE_TEST_DEADLINE_MS: "60000"
     },
     stdio: "ignore"
   });
   const ids = await waitForJson(marker);
-  context.after(async () => {
+  context.after(() => {
     stopOwnedProcess(ids.workerPid);
     stopOwnedProcess(ids.runnerPid);
     stopOwnedProcess(supervisor.pid);
-    try { stopOwnedProcess(Number(await readFile(psMarker, "utf8"))); } catch { /* no ps helper */ }
   });
   const exited = new Promise((resolve) => {
     supervisor.once("close", (code, signal) => resolve({ code, signal }));
@@ -354,6 +389,69 @@ test("the supervisor propagates a failing run's exit code", async (context) => {
   const result = await runSupervisor([failing], {});
 
   assert.equal(result.code, 1, "test failures must stay visible through the supervisor");
+});
+
+test("the process ledger preserves promisified execFile semantics", async (context) => {
+  const scratch = await mkdtemp(path.join(os.tmpdir(), "agent-office-supervisor-promisify-"));
+  context.after(() => rm(scratch, { recursive: true, force: true }));
+  const passing = path.join(scratch, "promisify.test.mjs");
+  await writeFile(passing, `
+    import test from "node:test";
+    import assert from "node:assert/strict";
+    import { execFile } from "node:child_process";
+    import { promisify } from "node:util";
+    test("keeps the native result object", async () => {
+      const result = await promisify(execFile)(process.execPath, ["-e", "process.stdout.write('ok')"]);
+      assert.equal(result.stdout, "ok");
+      assert.equal(result.stderr, "");
+    });
+  `);
+
+  const result = await runSupervisor([passing], {});
+
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+});
+
+test("the process ledger tracks a detached promisified execFile child", async (context) => {
+  if (process.platform === "win32") return;
+  const scratch = await mkdtemp(path.join(os.tmpdir(), "agent-office-supervisor-promisify-detached-"));
+  context.after(() => rm(scratch, { recursive: true, force: true }));
+  const marker = path.join(scratch, "detached.json");
+  const hanging = path.join(scratch, "promisify-detached.test.mjs");
+  await writeFile(hanging, `
+    import test from "node:test";
+    import { execFile } from "node:child_process";
+    import { writeFileSync } from "node:fs";
+    import { promisify } from "node:util";
+    test("hangs in a detached execFile", async () => {
+      await promisify(execFile)(process.execPath, ["-e", ${JSON.stringify(`
+        require("node:fs").writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ detachedPid: process.pid }));
+        setInterval(() => {}, 1000);
+      `)}], { detached: true });
+    });
+  `);
+  const markerPromise = waitForJson(marker);
+  const resultPromise = runSupervisor(
+    ["--test-timeout=600000", hanging],
+    { AGENT_OFFICE_TEST_DEADLINE_MS: "2500" }
+  );
+  const ids = await markerPromise;
+  context.after(() => stopOwnedProcess(ids.detachedPid));
+
+  const result = await resultPromise;
+
+  assert.equal(result.code, 124);
+  assert.equal(isAlive(ids.detachedPid), false, "promisify.custom bypassed child registration");
+});
+
+test("a timed-out command helper never reports success", async () => {
+  const result = await runCommand(
+    process.execPath,
+    ["-e", "setTimeout(() => {}, 10000)"],
+    { timeout: 50 }
+  );
+
+  assert.notEqual(result.code, 0);
 });
 
 test("the published package runs at least one real test", { timeout: 60_000 }, async (context) => {
