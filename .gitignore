@@ -1,0 +1,7 @@
+.agent-office*/
+.playwright-cli/
+node_modules/
+.DS_Store
+coverage/
+output/
+*.tgz

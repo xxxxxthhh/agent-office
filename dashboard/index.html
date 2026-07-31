@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Agent Office · Local Control Plane</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+        <div>
+          <p class="eyebrow">LOCAL CONTROL PLANE</p>
+          <h1>Agent Office</h1>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="connection-pill" id="connection-pill" data-state="connecting" role="status">
+          <span class="connection-dot"></span>
+          <span id="connection-label">正在连接</span>
+        </div>
+        <button class="button button-quiet" id="refresh-button" type="button">
+          刷新
+          <span class="key-hint">R</span>
+        </button>
+        <button class="button button-primary" id="new-task-button" type="button">
+          新建任务
+          <span class="key-hint">N</span>
+        </button>
+      </div>
+    </header>
+
+    <section class="metrics-strip" aria-label="系统概览">
+      <article class="metric">
+        <p>任务总数</p>
+        <strong id="metric-total">—</strong>
+        <span id="metric-total-note">等待数据</span>
+      </article>
+      <article class="metric">
+        <p>活跃任务</p>
+        <strong id="metric-active">—</strong>
+        <span>可继续或正在运行</span>
+      </article>
+      <article class="metric metric-attention">
+        <p>需要关注</p>
+        <strong id="metric-attention">—</strong>
+        <span>等待输入或失败</span>
+      </article>
+      <article class="metric">
+        <p>代理回合</p>
+        <strong id="metric-turns">—</strong>
+        <span id="metric-running-note">当前无运行代理</span>
+      </article>
+    </section>
+
+    <div class="control-grid">
+      <aside class="task-rail panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">WORK QUEUE</p>
+            <h2>任务</h2>
+          </div>
+          <span class="count-badge" id="task-count">0</span>
+        </div>
+        <label class="search-field">
+          <span class="sr-only">搜索任务</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="6"></circle>
+            <path d="m16 16 4 4"></path>
+          </svg>
+          <input id="task-search" type="search" placeholder="搜索目标或 ID" autocomplete="off">
+          <span class="key-hint">⌘K</span>
+        </label>
+        <div class="filter-row" id="task-filters" aria-label="任务筛选">
+          <button class="filter-button is-active" data-filter="all" type="button">全部</button>
+          <button class="filter-button" data-filter="active" type="button">活跃</button>
+          <button class="filter-button" data-filter="attention" type="button">关注</button>
+          <button class="filter-button" data-filter="completed" type="button">完成</button>
+        </div>
+        <div class="task-list" id="task-list" aria-live="polite"></div>
+      </aside>
+
+      <main class="task-stage panel">
+        <div class="empty-state" id="empty-state">
+          <div class="empty-orbit" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <p class="eyebrow">NO TASK SELECTED</p>
+          <h2>选择一个任务开始观察</h2>
+          <p>这里会显示代理状态、最新输出、交接消息和产物。</p>
+          <button class="button button-primary" id="empty-new-task" type="button">创建第一个任务</button>
+        </div>
+
+        <div class="task-content is-hidden" id="task-content">
+          <section class="task-hero">
+            <div class="task-identity">
+              <div class="task-meta-line">
+                <span class="status-chip" id="task-status">—</span>
+                <code id="task-id">—</code>
+                <span id="task-updated">—</span>
+              </div>
+              <h2 id="task-objective">—</h2>
+            </div>
+            <div class="task-actions">
+              <label class="round-control">
+                <span>轮次</span>
+                <input id="round-count" type="number" min="1" max="100" value="2">
+              </label>
+              <button class="button button-primary" id="run-task-button" type="button">启动协作</button>
+            </div>
+          </section>
+
+          <section class="section-block routing-block">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">CAPABILITY ROUTING</p>
+                <h3>任务分配计划</h3>
+              </div>
+              <span id="routing-summary">—</span>
+            </div>
+            <div class="routing-plan" id="routing-plan"></div>
+          </section>
+
+          <section class="section-block">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">TEAM STATUS</p>
+                <h3>同事状态</h3>
+              </div>
+              <span id="team-summary">—</span>
+            </div>
+            <div class="agent-grid" id="agent-grid"></div>
+          </section>
+
+          <section class="section-block conversation-section">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">LATEST OUTPUT</p>
+                <h3>协作记录</h3>
+              </div>
+              <span id="message-count">0 条消息</span>
+            </div>
+            <div class="conversation" id="conversation"></div>
+          </section>
+
+          <form class="message-composer" id="message-form">
+            <label>
+              <span class="sr-only">收件人</span>
+              <select id="message-recipient" aria-label="收件人"></select>
+            </label>
+            <label class="composer-input">
+              <span class="sr-only">发送消息</span>
+              <textarea id="message-body" rows="1" placeholder="发送决策、反馈或新的交接…" required></textarea>
+            </label>
+            <button class="button button-primary" type="submit">发送</button>
+          </form>
+        </div>
+      </main>
+
+      <aside class="monitor-rail">
+        <section class="panel monitor-card">
+          <div class="panel-heading compact">
+            <div>
+              <p class="eyebrow">RUNTIME</p>
+              <h2>本地运行时</h2>
+            </div>
+            <span class="live-tag"><span></span> LIVE</span>
+          </div>
+          <dl class="runtime-list">
+            <div><dt>服务运行</dt><dd id="runtime-uptime">—</dd></div>
+            <div><dt>代理</dt><dd id="runtime-agents">—</dd></div>
+            <div><dt>运行任务</dt><dd id="runtime-running">—</dd></div>
+            <div class="runtime-path"><dt>工作区</dt><dd id="runtime-workspace">—</dd></div>
+            <div class="runtime-path"><dt>状态目录</dt><dd id="runtime-state">—</dd></div>
+          </dl>
+        </section>
+
+        <section class="panel capability-card">
+          <div class="panel-heading compact">
+            <div>
+              <p class="eyebrow">CAPABILITY MAP</p>
+              <h2>模型与工具</h2>
+            </div>
+            <button class="icon-button icon-button-small" id="capability-refresh" type="button" aria-label="重新探测">↻</button>
+          </div>
+          <div class="capability-summary" id="capability-summary">等待探测…</div>
+          <div class="capability-list" id="capability-list"></div>
+        </section>
+
+        <section class="panel event-card">
+          <div class="panel-heading compact">
+            <div>
+              <p class="eyebrow">EVENT STREAM</p>
+              <h2>最近事件</h2>
+            </div>
+            <span class="count-badge" id="event-count">0</span>
+          </div>
+          <div class="event-list" id="event-list" aria-live="polite"></div>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <dialog class="dialog" id="new-task-dialog">
+    <form method="dialog" class="dialog-card" id="new-task-form">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">NEW SHARED OBJECTIVE</p>
+          <h2>新建协作任务</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="关闭" type="submit">×</button>
+      </div>
+      <label class="field">
+        <span>任务目标</span>
+        <textarea id="new-task-objective" rows="5" placeholder="清楚描述最终结果、边界和验收方式…" required></textarea>
+      </label>
+      <p class="form-note">系统会按模型能力、角色和工具匹配自动选择代理，并共享同一工作区。</p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" value="cancel" type="submit">取消</button>
+        <button class="button button-primary" id="create-task-button" value="default" type="submit">创建任务</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "workspace": "./example-workspace",
+  "stateDir": ".agent-office-custom",
+  "collaboration": {
+    "maxRounds": 3,
+    "transcriptMessages": 30,
+    "turnTimeoutMs": 300000
+  },
+  "agents": [
+    {
+      "id": "local-model",
+      "adapter": "command",
+      "role": "Analyze the task and return a protocol-compliant JSON handoff.",
+      "command": "./my-agent",
+      "args": [
+        "--workspace",
+        "{{workspace}}",
+        "--schema",
+        "{{schema}}"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "workspace": "./example-workspace",
+  "stateDir": ".agent-office-dashboard-demo",
+  "collaboration": {
+    "maxRounds": 3,
+    "transcriptMessages": 30,
+    "turnTimeoutMs": 10000
+  },
+  "agents": [
+    {
+      "id": "builder",
+      "adapter": "mock",
+      "role": "实现最小可用版本，提交产物并处理审查反馈。",
+      "replies": [
+        {
+          "summary": "完成首版实现，已将关键文件和验证结果交给 reviewer。",
+          "status": "done",
+          "messages": [
+            {
+              "to": "reviewer",
+              "body": "请检查空状态、错误处理和移动端布局，并把需要修改的内容直接交回给我。"
+            }
+          ],
+          "artifacts": [
+            "src/feature.js",
+            "tests/feature.test.js"
+          ],
+          "needsUser": false
+        },
+        {
+          "summary": "已处理 reviewer 的边界条件反馈，相关回归测试通过。",
+          "status": "done",
+          "messages": [],
+          "artifacts": [
+            "src/feature.js",
+            "tests/feature.test.js"
+          ],
+          "needsUser": false
+        }
+      ]
+    },
+    {
+      "id": "reviewer",
+      "adapter": "mock",
+      "role": "独立审查行为、边界条件和证据，给 builder 明确返工指令。",
+      "replies": [
+        {
+          "summary": "发现空输入边界没有覆盖，已发出聚焦返工要求。",
+          "status": "done",
+          "messages": [
+            {
+              "to": "builder",
+              "body": "请覆盖空输入并补一项回归测试，完成后报告实际测试结果。"
+            }
+          ],
+          "artifacts": [],
+          "needsUser": false
+        }
+      ]
+    }
+  ]
+}

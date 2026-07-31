@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "workspace": "./example-workspace",
+  "stateDir": ".agent-office",
+  "collaboration": {
+    "maxRounds": 4,
+    "transcriptMessages": 40,
+    "turnTimeoutMs": 600000
+  },
+  "routing": {
+    "enabled": true,
+    "maxAgents": 2,
+    "probeTimeoutMs": 10000,
+    "cacheTtlMs": 300000
+  },
+  "agents": [
+    {
+      "id": "codex",
+      "adapter": "codex",
+      "role": "Implement the smallest correct vertical slice, run focused verification, and hand concrete evidence to Claude.",
+      "sandbox": "workspace-write",
+      "ephemeral": true
+    },
+    {
+      "id": "claude",
+      "adapter": "claude",
+      "role": "Inspect Codex's current artifacts, test important behavior, fix valid issues when safe, and send precise handoffs.",
+      "permissionMode": "acceptEdits",
+      "noSessionPersistence": true
+    }
+  ]
+}
