@@ -19,7 +19,7 @@
     "tests/"
   ],
   "scripts": {
-    "check": "node --check bin/agent-office.js && node --check src/capabilities.js && node --check src/server.js && node --check dashboard/app.js && node tools/run-tests.mjs",
+    "check": "node --check bin/agent-office.js && node --check src/capabilities.js && node --check src/server.js && node --check dashboard/app.js && node --check tools/run-tests.mjs && node --check tools/_process-ledger.cjs && node tools/run-tests.mjs",
     "test": "node tools/run-tests.mjs",
     "demo": "node ./bin/agent-office.js demo"
   },

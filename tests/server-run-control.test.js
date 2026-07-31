@@ -47,16 +47,29 @@ const post = (url, body) => fetch(url, {
   body: JSON.stringify(body ?? {})
 });
 
+const cancellationError = () => {
+  const error = new Error("Run cancelled: mock");
+  error.details = { cancelled: true };
+  return error;
+};
+
 const blockingTurn = async ({ signal }) => {
+  if (signal?.aborted) throw cancellationError();
   await new Promise((resolve, reject) => {
-    signal?.addEventListener("abort", () => {
-      const error = new Error("Run cancelled: mock");
-      error.details = { cancelled: true };
-      reject(error);
-    }, { once: true });
+    signal?.addEventListener("abort", () => reject(cancellationError()), { once: true });
   });
   throw new Error("unreachable");
 };
+
+test("the blocking test turn observes an already-aborted signal", async () => {
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    blockingTurn({ signal: controller.signal }),
+    (error) => error.details?.cancelled === true
+  );
+});
 
 test("cancels a running task through the HTTP API", async (context) => {
   const { server, store } = await createServer(context, blockingTurn);
