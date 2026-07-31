@@ -62,14 +62,27 @@ export class Orchestrator {
     let lostTo = null;
     // Held for the whole run so a second process cannot interleave turns on the
     // same task and the same workspace.
-    const lease = await this.store.acquireRunLease(taskId, runId, {
+    let lease;
+    try {
+      lease = await this.store.acquireRunLease(taskId, runId, {
       workspace: this.config.workspace,
       onLost: (holder) => {
         lostTo = holder ?? {};
-        onEvent({ type: "run.lost", taskId, runId, takenOverBy: holder?.runId ?? null });
+        // Fence FIRST, unconditionally: an observer that throws must never be
+        // able to keep a lockless run writing. Notification is best-effort and
+        // strictly after the abort.
         controller.abort();
+        try {
+          onEvent({ type: "run.lost", taskId, runId, takenOverBy: holder?.runId ?? null });
+        } catch { /* observers cannot veto the fence */ }
       }
-    });
+      });
+    } catch (error) {
+      // A refused acquisition returns without running; the listener must not
+      // accumulate on the caller's signal across retries.
+      externalSignal?.removeEventListener("abort", onExternalAbort);
+      throw error;
+    }
     try {
       // Inside the try: a failure persisting the baseline must release the
       // leases like any other run failure, not leave them held forever.

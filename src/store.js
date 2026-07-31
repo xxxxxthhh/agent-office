@@ -322,19 +322,12 @@ export class TaskStore {
       if (released || lost) return;
       const current = await this.#assessLease(filePath);
       if (released || lost) return;
-      if (current && current.runId !== lease.runId) return markLost(current);
-      if (!current) {
-        // The file vanished; recreate exclusively so a racing new owner is
-        // never overwritten — EEXIST here means we lost the lock.
-        try {
-          await writeFile(filePath, JSON.stringify({ ...lease, heartbeatAt: nowIso() }), { flag: "wx" });
-        } catch (error) {
-          if (error.code !== "EEXIST") return;
-          const winner = await this.#assessLease(filePath);
-          if (winner && winner.runId !== lease.runId) markLost(winner);
-        }
-        return;
-      }
+      // Our own writes are atomic (temp+rename) and takeover replaces in
+      // place, so while we legitimately hold the lock this file always exists
+      // and parses. Foreign content OR absence both mean the lock is no longer
+      // ours — the documented recovery path ("delete the lock file and the run
+      // stops itself") depends on absence fencing rather than re-creating.
+      if (!current || current.runId !== lease.runId) return markLost(current);
       await atomicWrite(filePath, { ...lease, heartbeatAt: nowIso() });
     };
     // Deliberately ref'd: a held lease IS an active run, and the fence depends

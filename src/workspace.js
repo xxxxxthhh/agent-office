@@ -89,7 +89,7 @@ export async function diffSince(workspace, baseline, { stateDir, blobDir } = {})
   try {
     const currentHead = await headOf(workspace);
     const [statusResult, current] = await Promise.all([
-      git(workspace, ["status", "--porcelain"]),
+      git(workspace, ["status", "--porcelain", "--untracked-files=all"]),
       hashDirtyFiles(workspace, stateDir)
     ]);
     const ignored = ignoredPrefixes(workspace, stateDir);
@@ -250,7 +250,7 @@ async function hashDirtyFiles(workspace, stateDir) {
   const ignored = ignoredPrefixes(workspace, stateDir);
   let status;
   try {
-    status = await git(workspace, ["status", "--porcelain", "-z"]);
+    status = await git(workspace, ["status", "--porcelain", "--untracked-files=all", "-z"]);
   } catch {
     return hashes;
   }

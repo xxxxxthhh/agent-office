@@ -659,3 +659,136 @@ test("heartbeat temp files of the workspace lock never enter the diff", async (c
   assert.deepEqual(diff.changedDuringTask, []);
   assert.deepEqual(diff.status, []);
 });
+
+// --- Round 5: fence robustness, lock semantics, diff completeness ------------
+
+test("a throwing run.lost observer cannot disable the fence", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-observer-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const { WORKSPACE_LOCK_NAME } = await import("../src/store.js");
+  const config = normalizeConfig({
+    version: 1, workspace, stateDir: ".state",
+    collaboration: { maxRounds: 1, transcriptMessages: 10, turnTimeoutMs: 30_000 },
+    agents: [{ id: "w", adapter: "mock", role: "x" }]
+  }, workspace);
+  const store = new TaskStore(config.stateDir, { leaseHeartbeatMs: 40 });
+  const schema = await loadTurnSchema(DEFAULT_SCHEMA_PATH);
+  let sawAbort = false;
+  const orchestrator = new Orchestrator({
+    config, store, schema, schemaPath: DEFAULT_SCHEMA_PATH,
+    adapterOverrides: { w: { describe: () => ({ kind: "t", command: null, safety: "t" }),
+      runTurn: async ({ signal }) => new Promise((resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          sawAbort = true;
+          const error = new Error("Run cancelled: fenced");
+          error.details = { cancelled: true };
+          reject(error);
+        }, { once: true });
+      }) } }
+  });
+  const task = await orchestrator.createTask("observer boom");
+  // The observer throwing used to run BEFORE controller.abort(), leaving a
+  // heartbeat-less, lock-less run writing forever.
+  const run = orchestrator.runTask(task.id, {
+    onEvent: (event) => { if (event.type === "run.lost") throw new Error("observer boom"); }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await writeFile(path.join(workspace, WORKSPACE_LOCK_NAME), JSON.stringify({
+    taskId: "task-20260101-feedf00d", runId: "intruder", kind: "workspace",
+    workspace, pid: process.pid, host: os.hostname(),
+    startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString()
+  }));
+
+  const settled = await run;
+
+  assert.equal(sawAbort, true, "the fence did not fire past the throwing observer");
+  assert.equal(settled.status, "ready");
+});
+
+test("deleting the workspace lock fences the running owner", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-manual-rm-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const { WORKSPACE_LOCK_NAME } = await import("../src/store.js");
+  const config = normalizeConfig({
+    version: 1, workspace, stateDir: ".state",
+    collaboration: { maxRounds: 1, transcriptMessages: 10, turnTimeoutMs: 30_000 },
+    agents: [{ id: "w", adapter: "mock", role: "x" }]
+  }, workspace);
+  const store = new TaskStore(config.stateDir, { leaseHeartbeatMs: 40 });
+  const schema = await loadTurnSchema(DEFAULT_SCHEMA_PATH);
+  let sawAbort = false;
+  const orchestrator = new Orchestrator({
+    config, store, schema, schemaPath: DEFAULT_SCHEMA_PATH,
+    adapterOverrides: { w: { describe: () => ({ kind: "t", command: null, safety: "t" }),
+      runTurn: async ({ signal }) => new Promise((resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          sawAbort = true;
+          const error = new Error("Run cancelled: fenced");
+          error.details = { cancelled: true };
+          reject(error);
+        }, { once: true });
+      }) } }
+  });
+  const task = await orchestrator.createTask("manual unlock");
+  const run = orchestrator.runTask(task.id);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  // The manual recovery path the manual documents: remove the lock file and
+  // the owner stops itself. It used to silently recreate the lock instead.
+  await rm(path.join(workspace, WORKSPACE_LOCK_NAME));
+  const settled = await run;
+
+  assert.equal(sawAbort, true, "the owner kept running after its lock was removed");
+  assert.equal(settled.status, "ready");
+  const { existsSync: exists } = await import("node:fs");
+  assert.equal(
+    exists(path.join(workspace, WORKSPACE_LOCK_NAME)),
+    false,
+    "the deleted lock was recreated by the heartbeat"
+  );
+});
+
+test("refused acquisitions do not leak listeners on the caller's signal", async (context) => {
+  const { getEventListeners } = await import("node:events");
+  const { config, store, orchestrator, workspace } = await workspaceScaffold(context, async () => ({
+    response: { summary: "d", status: "done", messages: [], artifacts: [], needsUser: false },
+    tracePath: null
+  }));
+  const holderTask = await orchestrator.createTask("holder");
+  const holderLease = await store.acquireRunLease(holderTask.id, "run-holder", {
+    workspace: config.workspace
+  });
+  context.after(() => holderLease.release());
+  const loser = await orchestrator.createTask("loser");
+  const controller = new AbortController();
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    await assert.rejects(() => orchestrator.runTask(loser.id, { signal: controller.signal }));
+  }
+
+  assert.equal(
+    getEventListeners(controller.signal, "abort").length,
+    0,
+    "each refused run left an abort listener behind"
+  );
+});
+
+test("files in new nested directories are listed and patched individually", async (context) => {
+  const { workspace } = await gitWorkspace(context);
+  const options = { stateDir: path.join(workspace, ".state"), blobDir: path.join(workspace, ".state", "baselines") };
+  const { mkdir } = await import("node:fs/promises");
+  // A pre-task untracked file inside a directory must survive as preexisting.
+  await mkdir(path.join(workspace, "pre-dir"), { recursive: true });
+  await writeFile(path.join(workspace, "pre-dir", "old.txt"), "pre-task file\n");
+  const baseline = await captureBaseline(workspace, options);
+  await mkdir(path.join(workspace, "nested", "deep"), { recursive: true });
+  await writeFile(path.join(workspace, "nested", "deep", "new.txt"), "nested content\n");
+
+  const diff = await diffSince(workspace, baseline, options);
+
+  // Default git status collapses these to "nested/", which produced a listing
+  // with no patch at all.
+  assert.deepEqual(diff.changedDuringTask, ["nested/deep/new.txt"]);
+  assert.deepEqual(diff.preexisting, ["pre-dir/old.txt"]);
+  assert.ok(diff.patch.includes("nested content"), "the nested file's content is missing from the patch");
+});

@@ -293,4 +293,6 @@ npm run check
 
 项目只使用 Node.js 内置模块，因此不需要 `npm install`。
 
+测试有两层挂起防护：每个测试文件内置句柄看门狗（worker 存活超过 120 秒即打印持有句柄并失败退出），整个 `node --test` 进程树由 `tools/run-tests.mjs` 从外部监督（默认 240 秒死线，超时打印存活进程、杀掉进程树、以 124 退出；`AGENT_OFFICE_TEST_DEADLINE_MS` 可调）。任何一层触发都是确定性失败，而不是静默等待。
+
 更多设计说明见 [架构文档](docs/architecture.md) 和 [协作协议](docs/protocol.md)。
