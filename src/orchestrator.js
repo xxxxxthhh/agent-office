@@ -55,8 +55,10 @@ export class Orchestrator {
     const lease = await this.store.acquireRunLease(taskId, runId, {
       workspace: this.config.workspace
     });
-    await this.#ensureWorkspaceBaseline(taskId, task);
     try {
+      // Inside the try: a failure persisting the baseline must release the
+      // leases like any other run failure, not leave them held forever.
+      await this.#ensureWorkspaceBaseline(taskId, task);
       task = await this.#runRounds(taskId, { maxRounds, onEvent, signal, runId });
     } finally {
       await lease.release();

@@ -1,26 +1,46 @@
 import { spawn } from "node:child_process";
 import { AdapterError } from "../errors.js";
-import { truncate } from "../utils.js";
+import { sleep, truncate } from "../utils.js";
 
 const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
 const KILL_GRACE_MS = 500;
 const FORCE_EXIT_MS = 2000;
+const GROUP_POLL_MS = 25;
 
-// Signals the child's whole process group. Falls back to the direct child when
-// the group is already gone or the platform has no process groups.
+// Signals the child's whole process tree. On POSIX the child is spawned as a
+// process-group leader and the group is signalled; on Windows taskkill /T walks
+// the tree, since there is no group signal to send.
 function killTree(child, signal) {
-  if (!child.pid || child.killed && signal === "SIGTERM") {
-    try { child.kill(signal); } catch { /* already exited */ }
-    return;
-  }
+  if (!child.pid) return;
   if (process.platform === "win32") {
-    try { child.kill(signal); } catch { /* already exited */ }
+    const args = ["/pid", String(child.pid), "/T"];
+    if (signal === "SIGKILL") args.push("/F");
+    try {
+      spawn("taskkill", args, { stdio: "ignore" }).on("error", () => {});
+    } catch {
+      try { child.kill(signal); } catch { /* already exited */ }
+    }
     return;
   }
   try {
     process.kill(-child.pid, signal);
   } catch {
     try { child.kill(signal); } catch { /* already exited */ }
+  }
+}
+
+// True while any member of the child's process group is still alive. This is
+// what "the tree has exited" actually means: the direct child's `close` event
+// only proves the child and its stdio are gone, not its descendants.
+function isTreeAlive(child) {
+  if (!child.pid) return false;
+  // No group probe on Windows; taskkill /T /F is the only guarantee available.
+  if (process.platform === "win32") return false;
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
   }
 }
 
@@ -60,6 +80,7 @@ export function runProcess({
     let settled = false;
     let outputLimitExceeded = false;
     let termination = null;
+    let escalateTimer = null;
     let forceTimer = null;
 
     const timer = setTimeout(() => {
@@ -70,21 +91,42 @@ export function runProcess({
     }, timeoutMs);
     timer.unref();
 
-    // Signals the whole process group, then settles only once the tree has
-    // actually exited — releasing a run lease while descendants are still alive
-    // would let the next run write the same files concurrently.
+    // Signals the whole tree, then settles only once the tree has actually
+    // exited — releasing a run lease while descendants are still alive would
+    // let the next run write the same files concurrently.
     function beginTermination({ message, extra }) {
       if (settled || termination) return;
       termination = { message, extra };
       killTree(child, "SIGTERM");
-      const escalate = setTimeout(() => killTree(child, "SIGKILL"), KILL_GRACE_MS);
-      escalate.unref();
+      escalateTimer = setTimeout(() => killTree(child, "SIGKILL"), KILL_GRACE_MS);
+      escalateTimer.unref();
       forceTimer = setTimeout(() => {
-        // SIGKILL cannot be caught, so reaching here means a descendant is
-        // holding the pipes open. Report it rather than hanging forever.
+        // SIGKILL cannot be caught, so reaching here means something is truly
+        // wedged (uninterruptible I/O). Report it rather than hanging forever;
+        // the caller knows the tree may still exist via treeUnresponsive.
         finishReject(terminationError({ ...termination, unresponsive: true }));
       }, KILL_GRACE_MS + FORCE_EXIT_MS);
       forceTimer.unref();
+      // `close` may never fire if a descendant inherited the stdio pipes died
+      // with them open in an odd order; poll the group as an independent path
+      // to settling.
+      settleWhenTreeExits();
+    }
+
+    // The direct child's `close` proves nothing about grandchildren: a parent
+    // that obeys SIGTERM closes immediately while a SIGTERM-ignoring
+    // grandchild keeps writing until the SIGKILL escalation. Both settle paths
+    // funnel here and wait for the whole group to disappear.
+    async function settleWhenTreeExits() {
+      const deadline = Date.now() + KILL_GRACE_MS + FORCE_EXIT_MS;
+      while (!settled && isTreeAlive(child) && Date.now() < deadline) {
+        await sleep(GROUP_POLL_MS);
+      }
+      if (settled) return;
+      finishReject(terminationError({
+        ...termination,
+        unresponsive: isTreeAlive(child)
+      }));
     }
 
     function terminationError({ message, extra, unresponsive }) {
@@ -125,14 +167,20 @@ export function runProcess({
       }
       if (Buffer.byteLength(stdout) > MAX_CAPTURE_BYTES) {
         outputLimitExceeded = true;
-        child.kill("SIGTERM");
+        beginTermination({
+          message: `Process exceeded the ${MAX_CAPTURE_BYTES} byte output limit: ${command}`,
+          extra: { outputLimitExceeded: true }
+        });
       }
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
       if (Buffer.byteLength(stderr) > MAX_CAPTURE_BYTES) {
         outputLimitExceeded = true;
-        child.kill("SIGTERM");
+        beginTermination({
+          message: `Process exceeded the ${MAX_CAPTURE_BYTES} byte output limit: ${command}`,
+          extra: { outputLimitExceeded: true }
+        });
       }
     });
 
@@ -148,22 +196,10 @@ export function runProcess({
 
     child.on("close", (code, signal) => {
       if (onStdoutLine && lineBuffer.trim()) emitLine(lineBuffer);
-      // The tree is gone; only now is it safe to report the cancellation.
+      // A termination is in flight: the child is gone, but descendants may not
+      // be. Hand off to the group poll instead of settling here.
       if (termination) {
-        finishReject(terminationError(termination));
-        return;
-      }
-      if (outputLimitExceeded) {
-        finishReject(
-          new AdapterError(`Process exceeded the ${MAX_CAPTURE_BYTES} byte output limit: ${command}`, {
-            command,
-            args,
-            code,
-            signal,
-            stdout: truncate(stdout),
-            stderr: truncate(stderr)
-          })
-        );
+        settleWhenTreeExits();
         return;
       }
       if (code !== 0) {
@@ -203,6 +239,7 @@ export function runProcess({
 
     function cleanup() {
       clearTimeout(timer);
+      clearTimeout(escalateTimer);
       clearTimeout(forceTimer);
       signal?.removeEventListener("abort", onAbort);
     }

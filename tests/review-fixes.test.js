@@ -266,3 +266,183 @@ test("the Codex trace points at the event stream, not just the final message", a
   assert.match(trace, /ls -la/);
   assert.equal(result.usage.inputTokens, 5);
 });
+
+// --- Round 2: escalated findings against the first round of fixes -----------
+
+test("a SIGTERM-ignoring grandchild is dead by the time cancellation settles", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-grandchild-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const pidFile = path.join(workspace, "grandchild.pid");
+  const agent = path.join(workspace, "agent.cjs");
+  // The parent obeys SIGTERM and closes immediately; the grandchild ignores it.
+  // Settling on the parent's `close` alone would release the lease while the
+  // grandchild is alive and still writing.
+  await writeFile(agent, `
+    const { spawn } = require("node:child_process");
+    const grandchild = spawn(process.execPath, ["-e", \`
+      process.on("SIGTERM", () => {});
+      require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+      setInterval(() => {}, 1000);
+    \`], { stdio: "ignore" });
+    grandchild.unref();
+    process.stdin.resume();
+    setInterval(() => {}, 1000);
+  `);
+
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+  await assert.rejects(() => runProcess({
+    command: process.execPath,
+    args: [agent],
+    cwd: workspace,
+    signal: controller.signal,
+    timeoutMs: 15_000
+  }));
+
+  // The moment of settling is the moment a lease would be released.
+  const grandchildPid = Number(await readFile(pidFile, "utf8"));
+  assert.throws(
+    () => process.kill(grandchildPid, 0),
+    "the grandchild was still alive when the cancellation settled"
+  );
+});
+
+test("a baseline persistence failure still releases both leases", async (context) => {
+  const { config, store, orchestrator } = await workspaceScaffold(context, async () => ({
+    response: { summary: "d", status: "done", messages: [], artifacts: [], needsUser: false },
+    tracePath: null
+  }));
+  const task = await orchestrator.createTask("baseline failure");
+  const original = store.updateTask.bind(store);
+  store.updateTask = async (id, type, ...rest) => {
+    if (type === "workspace.baseline") throw new Error("injected baseline write failure");
+    return original(id, type, ...rest);
+  };
+
+  await assert.rejects(() => orchestrator.runTask(task.id), /injected baseline write failure/);
+
+  assert.equal(await store.readLease(task.id), null, "task lease leaked");
+  assert.equal(await store.readWorkspaceLease(config.workspace), null, "workspace lease leaked");
+});
+
+test("two configs with different stateDirs cannot share a workspace concurrently", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-xdir-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const schema = await loadTurnSchema(DEFAULT_SCHEMA_PATH);
+  const make = (stateDir, slow) => {
+    const config = normalizeConfig({
+      version: 1,
+      workspace,
+      stateDir,
+      collaboration: { maxRounds: 1, transcriptMessages: 10, turnTimeoutMs: 10_000 },
+      agents: [{ id: "w", adapter: "mock", role: "x" }]
+    }, workspace);
+    const store = new TaskStore(config.stateDir);
+    const orchestrator = new Orchestrator({
+      config, store, schema, schemaPath: DEFAULT_SCHEMA_PATH,
+      adapterOverrides: { w: { describe: () => ({ kind: "t", command: null, safety: "t" }),
+        runTurn: async () => {
+          if (slow) await new Promise((resolve) => setTimeout(resolve, 400));
+          return {
+            response: { summary: "d", status: "done", messages: [], artifacts: [], needsUser: false },
+            tracePath: null
+          };
+        } } }
+    });
+    return { config, store, orchestrator };
+  };
+  // Two legitimate configs, same workspace, DIFFERENT state directories: a lock
+  // kept inside either stateDir is invisible to the other.
+  const a = make(".stateA", true);
+  const b = make(".stateB", false);
+  const taskA = await a.orchestrator.createTask("A");
+  const taskB = await b.orchestrator.createTask("B");
+
+  const runA = a.orchestrator.runTask(taskA.id);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  await assert.rejects(
+    () => b.orchestrator.runTask(taskB.id),
+    (error) => {
+      assert.ok(error instanceof RunLeaseError);
+      assert.match(error.message, /Workspace .* already in use/);
+      return true;
+    }
+  );
+  await runA;
+
+  // And a symlink alias of the workspace is the same workspace.
+  const { symlink } = await import("node:fs/promises");
+  const alias = path.join(os.tmpdir(), `agent-office-alias-${Date.now()}`);
+  await symlink(workspace, alias);
+  context.after(() => rm(alias, { force: true }));
+  const c = make(".stateC", true);
+  const viaAlias = normalizeConfig({
+    version: 1,
+    workspace: alias,
+    stateDir: ".stateD",
+    collaboration: { maxRounds: 1, transcriptMessages: 10, turnTimeoutMs: 10_000 },
+    agents: [{ id: "w", adapter: "mock", role: "x" }]
+  }, alias);
+  const storeD = new TaskStore(viaAlias.stateDir);
+  const orchD = new Orchestrator({
+    config: viaAlias, store: storeD, schema, schemaPath: DEFAULT_SCHEMA_PATH,
+    adapterOverrides: { w: { describe: () => ({ kind: "t", command: null, safety: "t" }),
+      runTurn: async () => ({ response: { summary: "d", status: "done", messages: [], artifacts: [], needsUser: false }, tracePath: null }) } }
+  });
+  const taskC = await c.orchestrator.createTask("C");
+  const taskD = await orchD.createTask("D");
+  const runC = c.orchestrator.runTask(taskC.id);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  await assert.rejects(() => orchD.runTask(taskD.id), RunLeaseError);
+  await runC;
+});
+
+test("the task patch excludes pre-task dirt and includes untracked task files", async (context) => {
+  const { workspace } = await gitWorkspace(context);
+  const git = (args) => runProcess({ command: "git", args, cwd: workspace, timeoutMs: 10_000 });
+  await writeFile(path.join(workspace, "pre.txt"), "committed base\n");
+  await git(["add", "-A"]);
+  await git(["commit", "-qm", "add pre"]);
+  // Unstaged pre-task user edit the task never touches.
+  await writeFile(path.join(workspace, "pre.txt"), "user dirt\n");
+  const baseline = await captureBaseline(workspace);
+  await writeFile(path.join(workspace, "tracked.txt"), "task edit\n");
+  await writeFile(path.join(workspace, "new.txt"), "untracked task file\n");
+
+  const diff = await diffSince(workspace, baseline);
+
+  assert.deepEqual(diff.changedDuringTask, ["new.txt", "tracked.txt"]);
+  assert.deepEqual(diff.preexisting, ["pre.txt"]);
+  assert.equal(diff.patch.includes("pre.txt"), false, "pre-task dirt leaked into the task patch");
+  assert.equal(diff.stat.includes("pre.txt"), false, "pre-task dirt leaked into the task stat");
+  assert.ok(diff.patch.includes("untracked task file"), "untracked task file missing from patch");
+});
+
+test("a task that commits its work still reports a consistent list and patch", async (context) => {
+  const { workspace } = await gitWorkspace(context);
+  const git = (args) => runProcess({ command: "git", args, cwd: workspace, timeoutMs: 10_000 });
+  const baseline = await captureBaseline(workspace);
+  await writeFile(path.join(workspace, "tracked.txt"), "task edit, then committed\n");
+  await git(["add", "-A"]);
+  await git(["commit", "-qm", "task commit"]);
+
+  const diff = await diffSince(workspace, baseline);
+
+  // The tree is clean, but the task DID change this file.
+  assert.deepEqual(diff.changedDuringTask, ["tracked.txt"]);
+  assert.ok(diff.patch.includes("task edit, then committed"));
+});
+
+test("the workspace lock file never appears in a task diff", async (context) => {
+  const { workspace } = await gitWorkspace(context);
+  const baseline = await captureBaseline(workspace);
+  const { WORKSPACE_LOCK_NAME } = await import("../src/store.js");
+  await writeFile(path.join(workspace, WORKSPACE_LOCK_NAME), "{}");
+  await writeFile(path.join(workspace, "real-change.txt"), "task work\n");
+
+  const diff = await diffSince(workspace, baseline);
+
+  assert.deepEqual(diff.changedDuringTask, ["real-change.txt"]);
+  assert.equal(diff.patch.includes(WORKSPACE_LOCK_NAME), false);
+});

@@ -5,15 +5,20 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   rmdir,
   stat,
   writeFile
 } from "node:fs/promises";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { LockTimeoutError, RunLeaseError, TaskNotFoundError } from "./errors.js";
 import { assertNonEmptyString, nowIso, sleep } from "./utils.js";
+
+// Lives at the workspace root so every config pointing at this workspace sees
+// the same lock, whatever stateDir each of them uses.
+export const WORKSPACE_LOCK_NAME = ".agent-office.lock";
 
 export class TaskStore {
   constructor(stateDir, options = {}) {
@@ -243,87 +248,131 @@ export class TaskStore {
   // A run lease makes "this task is being executed right now" a fact on disk
   // rather than in one process's memory, so a second `agent-office run` fails
   // fast instead of interleaving turns, and a crashed run is recognisable.
-  // Two leases are taken together: one for the task, and one for the workspace.
-  // The task lease alone would still let two *different* tasks sharing a
-  // workspace run at the same time and overwrite each other's files, which the
-  // serial-execution guarantee forbids.
+  // Two locks are taken together: a task lease in this store's leasesDir, and a
+  // workspace lock at a fixed name INSIDE the workspace itself. The task lease
+  // alone would still let two *different* tasks sharing a workspace run at the
+  // same time; and a workspace lock kept in the stateDir would only be visible
+  // to configs sharing that stateDir — two configs with different stateDirs
+  // pointing at one workspace would each "acquire" their own copy. The
+  // workspace root is the one location every such config can see, and realpath
+  // collapses symlink aliases of it.
   async acquireRunLease(taskId, runId, { workspace } = {}) {
     validateTaskId(taskId);
-    const names = [taskId];
-    if (workspace) names.push(workspaceLeaseName(workspace));
+    const startedAt = nowIso();
+    const makeLease = (kind, canonicalWorkspace) => ({
+      taskId,
+      runId,
+      kind,
+      workspace: canonicalWorkspace,
+      pid: process.pid,
+      host: this.hostname,
+      startedAt,
+      heartbeatAt: startedAt
+    });
 
-    return this.#withLock(async () => {
-      for (const name of names) {
-        const existing = await this.#readLeaseUnlocked(name);
-        if (!existing?.alive) continue;
+    const canonicalWorkspace = workspace
+      ? await realpath(workspace).catch(() => path.resolve(workspace))
+      : null;
+
+    const taskLease = await this.#withLock(async () => {
+      const existing = await this.#assessLease(this.#leasePath(taskId));
+      if (existing?.alive) {
         throw new RunLeaseError(
-          existing.kind === "workspace" && existing.taskId !== taskId
-            ? `Workspace ${existing.workspace} is already in use by task ${existing.taskId} `
-              + `(pid ${existing.pid} on ${existing.host}, started ${existing.startedAt}). `
-              + "Agents run one at a time per workspace; stop that run first."
-            : `Task ${taskId} is already being run by pid ${existing.pid} on ${existing.host} `
-              + `(started ${existing.startedAt}). Stop that run before starting another.`,
+          `Task ${taskId} is already being run by pid ${existing.pid} on ${existing.host} `
+          + `(started ${existing.startedAt}). Stop that run before starting another.`,
           existing
         );
       }
+      // Unconditional: a lease file that failed to parse also has no live
+      // holder, and leaving it would make the exclusive create below fail with
+      // a raw EEXIST instead of the RunLeaseError above.
+      await rm(this.#leasePath(taskId), { force: true });
+      const lease = makeLease("task", canonicalWorkspace);
+      await writeFile(this.#leasePath(taskId), JSON.stringify(lease), { flag: "wx" });
+      return lease;
+    });
 
-      const startedAt = nowIso();
-      const written = [];
+    let workspaceLock = null;
+    if (canonicalWorkspace) {
       try {
-        for (const name of names) {
-          // Unconditional: a lease file that failed to parse also has no live
-          // holder, and leaving it would make the exclusive create below fail
-          // with a raw EEXIST instead of the RunLeaseError above.
-          await rm(this.#leasePath(name), { force: true });
-          const lease = {
-            taskId,
-            runId,
-            kind: name === taskId ? "task" : "workspace",
-            workspace: workspace ? path.resolve(workspace) : null,
-            pid: process.pid,
-            host: this.hostname,
-            startedAt,
-            heartbeatAt: startedAt
-          };
-          await writeFile(this.#leasePath(name), JSON.stringify(lease), { flag: "wx" });
-          written.push({ name, lease });
-        }
+        workspaceLock = await this.#acquireWorkspaceLock(canonicalWorkspace, makeLease);
       } catch (error) {
-        // Never leave a half-acquired pair behind.
-        for (const { name } of written) await rm(this.#leasePath(name), { force: true });
+        // Never hold the task lease when the workspace could not be locked.
+        await rm(this.#leasePath(taskId), { force: true });
         throw error;
       }
+    }
 
-      const timer = setInterval(() => {
-        for (const { name, lease } of written) {
-          this.#writeLeaseAtomic(name, { ...lease, heartbeatAt: nowIso() }).catch(() => {});
+    const heartbeats = [
+      { write: (lease) => this.#writeLeaseAtomic(taskId, lease), lease: taskLease },
+      ...(workspaceLock
+        ? [{ write: (lease) => atomicWrite(workspaceLock.path, lease), lease: workspaceLock.lease }]
+        : [])
+    ];
+    const timer = setInterval(() => {
+      for (const beat of heartbeats) {
+        beat.write({ ...beat.lease, heartbeatAt: nowIso() }).catch(() => {});
+      }
+    }, this.leaseHeartbeatMs);
+    timer.unref();
+
+    return {
+      ...taskLease,
+      release: async () => {
+        clearInterval(timer);
+        const currentTask = await this.#assessLease(this.#leasePath(taskId));
+        if (!currentTask || currentTask.runId === runId) {
+          await rm(this.#leasePath(taskId), { force: true });
         }
-      }, this.leaseHeartbeatMs);
-      timer.unref();
-
-      return {
-        ...written[0].lease,
-        release: async () => {
-          clearInterval(timer);
-          for (const { name } of written) {
-            const current = await this.#readLeaseUnlocked(name);
-            // Never delete a lease that a later run already took over.
-            if (!current || current.runId === runId) {
-              await rm(this.#leasePath(name), { force: true });
-            }
+        if (workspaceLock) {
+          const currentWorkspace = await this.#assessLease(workspaceLock.path);
+          // Never delete a lock that a later run already took over.
+          if (!currentWorkspace || currentWorkspace.runId === runId) {
+            await rm(workspaceLock.path, { force: true });
           }
         }
-      };
-    });
+      }
+    };
+  }
+
+  // The stateDir #withLock cannot serialize configs with different stateDirs,
+  // so the workspace lock relies on the atomicity of exclusive create instead:
+  // whoever wins the O_EXCL open owns the workspace.
+  async #acquireWorkspaceLock(canonicalWorkspace, makeLease) {
+    const lockPath = path.join(canonicalWorkspace, WORKSPACE_LOCK_NAME);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const lease = makeLease("workspace", canonicalWorkspace);
+      try {
+        await writeFile(lockPath, JSON.stringify(lease), { flag: "wx" });
+        return { path: lockPath, lease };
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+      }
+      const existing = await this.#assessLease(lockPath);
+      if (existing?.alive) {
+        throw new RunLeaseError(
+          `Workspace ${canonicalWorkspace} is already in use by task ${existing.taskId} `
+          + `(pid ${existing.pid} on ${existing.host}, started ${existing.startedAt}). `
+          + "Agents run one at a time per workspace; stop that run first.",
+          existing
+        );
+      }
+      // Stale or unreadable: clear it and race for the exclusive create again.
+      await rm(lockPath, { force: true });
+    }
+    throw new RunLeaseError(
+      `Could not acquire the workspace lock at ${lockPath} after repeated attempts.`
+    );
   }
 
   async readWorkspaceLease(workspace) {
-    return this.#readLeaseUnlocked(workspaceLeaseName(workspace));
+    const canonicalWorkspace = await realpath(workspace).catch(() => path.resolve(workspace));
+    return this.#assessLease(path.join(canonicalWorkspace, WORKSPACE_LOCK_NAME));
   }
 
   async readLease(taskId) {
     validateTaskId(taskId);
-    return this.#readLeaseUnlocked(taskId);
+    return this.#assessLease(this.#leasePath(taskId));
   }
 
   async listLeases() {
@@ -332,17 +381,17 @@ export class TaskStore {
     const leases = [];
     for (const name of names) {
       if (!name.endsWith(".json")) continue;
-      const lease = await this.#readLeaseUnlocked(name.slice(0, -".json".length));
+      const lease = await this.#assessLease(path.join(this.leasesDir, name));
       // Workspace leases mirror a task lease; surfacing both would double-count.
       if (lease && lease.kind !== "workspace") leases.push(lease);
     }
     return leases;
   }
 
-  async #readLeaseUnlocked(name) {
+  async #assessLease(filePath) {
     let lease;
     try {
-      lease = JSON.parse(await readFile(this.#leasePath(name), "utf8"));
+      lease = JSON.parse(await readFile(filePath, "utf8"));
     } catch {
       return null;
     }
@@ -434,7 +483,7 @@ export class TaskStore {
   async deleteTask(taskId) {
     validateTaskId(taskId);
     return this.#withLock(async () => {
-      const lease = await this.#readLeaseUnlocked(taskId);
+      const lease = await this.#assessLease(this.#leasePath(taskId));
       if (lease?.alive) {
         throw new RunLeaseError(
           `Task ${taskId} is running on pid ${lease.pid} (${lease.host}) and cannot be deleted. `
@@ -492,6 +541,12 @@ function createTaskId() {
   return `task-${date}-${randomBytes(4).toString("hex")}`;
 }
 
+async function atomicWrite(target, lease) {
+  const temporary = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  await writeFile(temporary, JSON.stringify(lease), "utf8");
+  await rename(temporary, target);
+}
+
 function safeParseJson(line) {
   try {
     return JSON.parse(line);
@@ -499,13 +554,6 @@ function safeParseJson(line) {
     // A torn final line from a crashed append must not break the whole read.
     return null;
   }
-}
-
-// A stable, filesystem-safe name for the workspace lease. Keyed by the resolved
-// path so two configs pointing at the same directory collide as intended.
-function workspaceLeaseName(workspace) {
-  const resolved = path.resolve(workspace);
-  return `workspace-${createHash("sha1").update(resolved).digest("hex").slice(0, 16)}`;
 }
 
 function isProcessAlive(pid) {
