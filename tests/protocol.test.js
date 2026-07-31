@@ -1,3 +1,4 @@
+import "./_hang-watchdog.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseTurnEnvelope } from "../src/protocol.js";

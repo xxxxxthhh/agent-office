@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { runProcess } from "./adapters/process.js";
@@ -130,21 +131,47 @@ export async function diffSince(workspace, baseline, { stateDir, blobDir } = {})
     if (baseline && changedDuringTask.length) {
       const headBased = [];
       for (const file of changedDuringTask) {
-        // A pre-task dirty file: its head-diff would mix the user's pre-task
-        // edit with the task's; diff against the baseline snapshot instead.
-        const blobPath = blobDir && file in base && base[file] !== "absent"
+        // What matters for the patch target is what is actually on disk NOW;
+        // `current` only lists files git still reports as dirty, so a file the
+        // task committed or restored is missing from it while very much present.
+        const onDisk = existsSync(path.join(workspace, file));
+        const inBase = file in base;
+        const blobPath = blobDir && inBase && base[file] !== "absent"
           ? path.join(blobDir, base[file])
           : null;
-        const hasBlob = blobPath && await readFile(blobPath).then(() => true).catch(() => false);
-        if (hasBlob) {
-          // The task may also have deleted the file entirely.
-          const target = current[file] === "absent" ? "/dev/null" : file;
+        const hasBlob = blobPath && existsSync(blobPath);
+
+        if (inBase && base[file] === "absent") {
+          // Deleted before the task, present again now: the task restored it,
+          // and the whole current content is the task's delta.
+          if (onDisk) {
+            patch += await gitDiffOutput(
+              workspace,
+              ["diff", "--no-index", "--", "/dev/null", file]
+            );
+            stat += `${file} | restored during the task\n`;
+          } else {
+            // Absent on both sides of the task; only a commit in between can
+            // have listed it, and the head-based diff covers that.
+            headBased.push(file);
+          }
+        } else if (hasBlob) {
+          // Pre-task dirty file with a snapshot: diff snapshot -> now shows
+          // only the task's delta, whether the task edited, committed or
+          // deleted it.
+          const target = onDisk ? file : "/dev/null";
           const filePatch = await gitDiffOutput(
             workspace,
             ["diff", "--no-index", "--", blobPath, target]
           );
           patch += relabel(filePatch, blobPath, file);
           stat += `${file} | changed during the task (vs pre-task snapshot)\n`;
+        } else if (inBase && !onDisk) {
+          // Pre-task dirty (e.g. untracked) file the task deleted, with no
+          // surviving snapshot: nothing left to diff. Say so explicitly rather
+          // than emitting an empty patch that contradicts the file list.
+          stat += `${file} | deleted during the task (no snapshot of the `
+            + "pre-task content survives)\n";
         } else if (untrackedNow.has(file)) {
           patch += await gitDiffOutput(
             workspace,
@@ -156,7 +183,7 @@ export async function diffSince(workspace, baseline, { stateDir, blobDir } = {})
           // Pre-dirty but no snapshot survives (legacy task or oversized file):
           // the head-diff below unavoidably includes the pre-task edit. Say so
           // instead of presenting it as pure task output.
-          if (file in base) {
+          if (inBase) {
             stat += `${file} | WARNING: no baseline snapshot; the patch below may `
               + "include pre-task edits\n";
           }
@@ -209,7 +236,7 @@ async function headOf(workspace) {
 
 async function namesBetween(workspace, from, to) {
   try {
-    const result = await git(workspace, ["diff", "--name-only", from, to]);
+    const result = await git(workspace, ["diff", "--name-only", "--no-renames", from, to]);
     return result.stdout.trim().split("\n").filter(Boolean);
   } catch {
     return [];
@@ -267,14 +294,13 @@ function ignoredPrefixes(workspace, stateDir) {
       prefixes.push(`${relative}/`);
     }
   }
-  return {
-    prefixes,
-    names: new Set([WORKSPACE_LOCK_NAME, `${WORKSPACE_LOCK_NAME}.takeover`])
-  };
+  return { prefixes };
 }
 
 function isInternal(file, ignored) {
-  if (ignored.names.has(file)) return true;
+  // The lock, its takeover mutex, and heartbeat temp files all share the lock
+  // name as a prefix; none of them is user content.
+  if (file.startsWith(WORKSPACE_LOCK_NAME)) return true;
   return ignored.prefixes.some((prefix) => file.startsWith(prefix));
 }
 

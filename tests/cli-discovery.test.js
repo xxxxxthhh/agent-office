@@ -1,3 +1,4 @@
+import "./_hang-watchdog.mjs";
 // Regression tests for provider discovery parsers.
 //
 // Provenance: `tests/fixtures/cli/claude-help.txt` is verbatim output from

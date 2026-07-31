@@ -1,3 +1,4 @@
+import "./_hang-watchdog.mjs";
 // Regressions for the five issues found reviewing commit ac9f052.
 // Each test reproduces the reported defect, so a revert of the fix fails here.
 
@@ -528,4 +529,133 @@ test("an uncommitted rename is reported with both real paths", async (context) =
     diff.patch.includes("before-name.txt"),
     "the old path's disappearance is missing from the patch"
   );
+});
+
+// --- Round 4: single-writer fencing and diff completeness --------------------
+
+test("a live same-host holder with a paused heartbeat is not taken over", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-sigstop-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const { WORKSPACE_LOCK_NAME } = await import("../src/store.js");
+  // A holder whose heartbeat went silent long ago but whose PID (ours) is very
+  // much alive — the shape of a SIGSTOPped process. Taking this lock over would
+  // create two writers the moment the process resumes.
+  await writeFile(path.join(workspace, WORKSPACE_LOCK_NAME), JSON.stringify({
+    taskId: "task-20260101-00000001", runId: "paused-holder", kind: "workspace",
+    workspace, pid: process.pid, host: os.hostname(),
+    startedAt: "2020-01-01T00:00:00.000Z", heartbeatAt: "2020-01-01T00:00:00.000Z"
+  }));
+  const store = new TaskStore(path.join(workspace, ".state"), { staleLeaseMs: 50 });
+  await store.init();
+
+  await assert.rejects(
+    () => store.acquireRunLease("task-20260101-00000002", "run-b", { workspace }),
+    (error) => {
+      assert.ok(error instanceof RunLeaseError);
+      assert.equal(error.holder.runId, "paused-holder");
+      return true;
+    }
+  );
+});
+
+test("a run whose workspace lock is stolen fences itself off", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-fence-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const { WORKSPACE_LOCK_NAME } = await import("../src/store.js");
+  const config = normalizeConfig({
+    version: 1, workspace, stateDir: ".state",
+    collaboration: { maxRounds: 1, transcriptMessages: 10, turnTimeoutMs: 30_000 },
+    agents: [{ id: "w", adapter: "mock", role: "x" }]
+  }, workspace);
+  const store = new TaskStore(config.stateDir, { leaseHeartbeatMs: 40 });
+  const schema = await loadTurnSchema(DEFAULT_SCHEMA_PATH);
+  let sawAbort = false;
+  const orchestrator = new Orchestrator({
+    config, store, schema, schemaPath: DEFAULT_SCHEMA_PATH,
+    adapterOverrides: { w: { describe: () => ({ kind: "t", command: null, safety: "t" }),
+      runTurn: async ({ signal }) => new Promise((resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          sawAbort = true;
+          const error = new Error("Run cancelled: fenced");
+          error.details = { cancelled: true };
+          reject(error);
+        }, { once: true });
+      }) } }
+  });
+  const task = await orchestrator.createTask("fence test");
+  const events = [];
+  const run = orchestrator.runTask(task.id, { onEvent: (event) => events.push(event.type) });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  // Any takeover path ends with a foreign lock at this path; the holder must
+  // notice and stop writing rather than continue as a second writer.
+  await writeFile(path.join(workspace, WORKSPACE_LOCK_NAME), JSON.stringify({
+    taskId: "task-20260101-feedf00d", runId: "intruder", kind: "workspace",
+    workspace, pid: process.pid, host: os.hostname(),
+    startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString()
+  }));
+  const settled = await run;
+
+  assert.equal(sawAbort, true, "the in-flight turn was not aborted on lease loss");
+  assert.ok(events.includes("run.lost"), "no run.lost event was emitted");
+  assert.equal(settled.status, "ready", "a fenced run stays resumable");
+});
+
+test("a file deleted before the task and restored by it has a real patch", async (context) => {
+  const { workspace } = await gitWorkspace(context);
+  const options = { stateDir: path.join(workspace, ".state"), blobDir: path.join(workspace, ".state", "baselines") };
+  await rm(path.join(workspace, "tracked.txt"));
+  const baseline = await captureBaseline(workspace, options);
+  await writeFile(path.join(workspace, "tracked.txt"), "baseline\n");
+
+  const diff = await diffSince(workspace, baseline, options);
+
+  assert.deepEqual(diff.changedDuringTask, ["tracked.txt"]);
+  assert.ok(diff.patch.includes("+baseline"), "the restore is invisible in the patch");
+  assert.match(diff.stat, /restored during the task/);
+});
+
+test("a pre-task untracked file deleted by the task shows its content in the patch", async (context) => {
+  const { workspace } = await gitWorkspace(context);
+  const options = { stateDir: path.join(workspace, ".state"), blobDir: path.join(workspace, ".state", "baselines") };
+  await writeFile(path.join(workspace, "pre-untracked.txt"), "user file content\n");
+  const baseline = await captureBaseline(workspace, options);
+  await rm(path.join(workspace, "pre-untracked.txt"));
+
+  const diff = await diffSince(workspace, baseline, options);
+
+  assert.deepEqual(diff.changedDuringTask, ["pre-untracked.txt"]);
+  assert.ok(
+    diff.patch.includes("-user file content"),
+    "the deletion produced an empty patch while the list names the file"
+  );
+});
+
+test("a committed rename keeps the old path in the list and patch", async (context) => {
+  const { workspace, git } = await gitWorkspace(context);
+  await writeFile(path.join(workspace, "before-name.txt"), "content\n");
+  await git(["add", "-A"]);
+  await git(["commit", "-qm", "add before-name"]);
+  const baseline = await captureBaseline(workspace);
+  await git(["mv", "before-name.txt", "after-name.txt"]);
+  await git(["commit", "-qm", "rename"]);
+
+  const diff = await diffSince(workspace, baseline);
+
+  // Rename detection collapses --name-only output to the destination alone.
+  assert.deepEqual(diff.changedDuringTask, ["after-name.txt", "before-name.txt"]);
+  assert.ok(diff.patch.includes("before-name.txt"), "the old path vanished from the patch");
+});
+
+test("heartbeat temp files of the workspace lock never enter the diff", async (context) => {
+  const { workspace } = await gitWorkspace(context);
+  const { WORKSPACE_LOCK_NAME } = await import("../src/store.js");
+  const baseline = await captureBaseline(workspace);
+  // The exact shape atomicWrite produces mid-heartbeat.
+  await writeFile(path.join(workspace, `${WORKSPACE_LOCK_NAME}.61829.fced80d6.tmp`), "{}");
+
+  const diff = await diffSince(workspace, baseline);
+
+  assert.deepEqual(diff.changedDuringTask, []);
+  assert.deepEqual(diff.status, []);
 });

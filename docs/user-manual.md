@@ -488,7 +488,8 @@ CLI 端同样会打印进度，但只打印**工具调用和提示**两类——
 
 - 补丁按任务文件列表生成，任务开始前就脏、任务没碰过的文件**不会**混入任务补丁；
 - **任务开始前就脏、任务又改了它**的文件：基线时会保存该文件的内容快照（≤ 1 MiB，存入 `<stateDir>/baselines/`，按内容寻址），补丁对着快照生成——只显示任务的增量，用户任务前的改动不会泄漏进来。快照缺失（旧任务或超大文件）时退回相对 HEAD 的 diff，并在统计里**明确标注**该补丁可能含任务前改动；
-- 未提交的重命名（`git mv`）按新旧两个真实路径报告，补丁包含旧路径的删除；
+- 重命名（`git mv`，无论是否已提交）按新旧两个真实路径报告，补丁包含旧路径的删除；
+- 任务**恢复**了用户任务前删除的文件、或**删除**了任务前的未跟踪文件，补丁同样完整呈现（后者需要基线快照；快照缺失时在统计里明确说明，而不是给出空补丁）；
 - 任务新建的未跟踪文件也出现在补丁里（通过 `--no-index` 合成）；
 - 补丁超过 512 KiB 会截断。
 
@@ -726,12 +727,15 @@ Agents run one at a time per workspace; stop that run first.
 
 ### 10.2 过期租约的判定
 
-租约在下列情况被判定为过期并可被接管：
+- **同一主机**：**只看进程是否存活**。进程还在（哪怕被 `SIGSTOP` 暂停、心跳早已停更）就绝不自动接管——被暂停的进程随时会恢复并继续写工作区，接管它的锁等于制造两个写者。只有进程号确实消失（崩溃、`kill -9`）才可接管，无需手工清理。
+- **其他主机**：无法探测进程，心跳超过 30 秒未更新即视为过期。
 
-- **同一主机**：心跳超过 30 秒未更新，**或**记录的进程号已不存在；
-- **其他主机**：心跳超过 30 秒未更新（无法跨机检查进程存活）。
+**第二道防线（fence）**：即使锁被以任何方式夺走（跨主机接管、手工删锁后他人抢占），原持有者的心跳会在下一个周期发现锁已易主，立即**中止自己正在运行的代理进程树**（等同一次取消：任务回到 `ready`，记录 `run.lost` 事件，代理不标记为失败）。心跳只刷新确认仍属于自己的锁，绝不覆盖他人的。
 
-因此进程被 `kill -9` 后，下一次运行会自动接管，无需手工清理。
+**代价与边界**：
+
+- 一个被永久暂停/卡死但存活的进程会一直占住工作区。这是设计选择——严格单写者优先于可用性。确认该进程不会恢复后，`kill` 它（锁随 PID 消失变为可接管），或手动删除 `<workspace>/.agent-office.lock`（fence 会让原运行在下个心跳周期自行停止）。
+- 极端的 PID 复用场景（崩溃残留的锁记录的 PID 恰被无关进程复用）会让锁看似有主，同样用手动删锁解决。
 
 ### 10.3 中断一次运行
 
@@ -912,7 +916,7 @@ Agent Office 依次尝试：直接解析 → 提取 Markdown 代码围栏中的 
 
 ### 13.2 事件类型
 
-**持久化到 `events.jsonl` 的事件**：`task.created`、`run.started`、`round.completed`、`turn.completed`、`turn.failed`、`run.stalled`、`run.paused`、`run.cancelled`、`task.status_changed`、`message.sent`。
+**持久化到 `events.jsonl` 的事件**：`task.created`、`run.started`、`round.completed`、`turn.completed`、`turn.failed`、`run.stalled`、`run.paused`、`run.cancelled`、`run.lost`（工作区锁被他人夺走、本方已自行停止）、`workspace.baseline`、`task.status_changed`、`message.sent`。
 
 `run.paused`（达到轮次上限）与 `run.cancelled`（用户中断）是**不同**的事件类型，便于区分。
 
@@ -1035,6 +1039,10 @@ Agent Office 不保存、不读取、不转发任何 Codex / Claude 凭据。认
 ### `Task ... was created for [...], but the current configuration defines [...]`
 
 配置里的代理名单或适配器与任务创建时不一致。恢复原配置，或新建任务。
+
+### `Workspace ... is already in use by task ...`，但那个任务看起来没在动
+
+锁持有者的进程仍存活（可能被暂停或卡住）。同机存活进程不会被自动接管（见 [10.2](#102-过期租约的判定)）。确认它不会恢复后：`kill <pid>`（之后锁自动可接管），或删除 `<workspace>/.agent-office.lock`（原运行会在下个心跳周期因 fence 自行停止）。
 
 ### `Timed out waiting for state lock`
 

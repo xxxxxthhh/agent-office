@@ -44,28 +44,50 @@ export class Orchestrator {
   async runTask(taskId, options = {}) {
     const maxRounds = options.maxRounds ?? this.config.collaboration.maxRounds;
     const onEvent = options.onEvent ?? (() => {});
-    const signal = options.signal ?? null;
+    const externalSignal = options.signal ?? null;
     const runId = options.runId ?? randomUUID();
     let task = await this.store.loadTask(taskId);
     this.#assertTaskRoster(task);
     if (["completed", "awaiting_input", "failed"].includes(task.status)) return task;
 
+    // The run's own controller composes the caller's signal with the lease
+    // fence: losing the workspace lock must stop the agent process just like a
+    // user cancellation would, because a fenced run that keeps writing is a
+    // second concurrent writer.
+    const controller = new AbortController();
+    const onExternalAbort = () => controller.abort();
+    if (externalSignal?.aborted) controller.abort();
+    externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
+
+    let lostTo = null;
     // Held for the whole run so a second process cannot interleave turns on the
     // same task and the same workspace.
     const lease = await this.store.acquireRunLease(taskId, runId, {
-      workspace: this.config.workspace
+      workspace: this.config.workspace,
+      onLost: (holder) => {
+        lostTo = holder ?? {};
+        onEvent({ type: "run.lost", taskId, runId, takenOverBy: holder?.runId ?? null });
+        controller.abort();
+      }
     });
     try {
       // Inside the try: a failure persisting the baseline must release the
       // leases like any other run failure, not leave them held forever.
       await this.#ensureWorkspaceBaseline(taskId, task);
-      task = await this.#runRounds(taskId, { maxRounds, onEvent, signal, runId });
+      task = await this.#runRounds(taskId, { maxRounds, onEvent, signal: controller.signal, runId });
     } finally {
+      externalSignal?.removeEventListener("abort", onExternalAbort);
       await lease.release();
       // Raw run output accumulates per turn; prune once per run rather than per
       // write. In `finally` so a run that throws still cleans up, and never
       // letting a housekeeping failure surface as a run failure.
       await this.store.pruneRunFiles?.().catch(() => {});
+    }
+    if (lostTo) {
+      await this.store.updateTask(taskId, "run.lost", () => {}, {
+        runId,
+        takenOverBy: lostTo.runId ?? null
+      }).catch(() => {});
     }
     return task;
   }

@@ -258,7 +258,7 @@ export class TaskStore {
   // pointing at one workspace would each "acquire" their own copy. The
   // workspace root is the one location every such config can see, and realpath
   // collapses symlink aliases of it.
-  async acquireRunLease(taskId, runId, { workspace } = {}) {
+  async acquireRunLease(taskId, runId, { workspace, onLost } = {}) {
     validateTaskId(taskId);
     const startedAt = nowIso();
     const makeLease = (kind, canonicalWorkspace) => ({
@@ -306,21 +306,50 @@ export class TaskStore {
     }
 
     // Rewriting blindly would let a holder whose lock was superseded stomp the
-    // new owner's file; refresh only what is verifiably still ours.
+    // new owner's file. The refresh therefore verifies ownership — and when it
+    // finds a foreign lock, that is the moment this run has LOST the workspace:
+    // going quiet is not enough, because the process itself would keep writing.
+    // The onLost callback lets the orchestrator fence the run (abort it).
+    let released = false;
+    let lost = false;
+    const markLost = (holder) => {
+      if (lost || released) return;
+      lost = true;
+      clearInterval(timer);
+      try { onLost?.(holder ?? null); } catch { /* fencing is best-effort */ }
+    };
     const refresh = async (filePath, lease) => {
+      if (released || lost) return;
       const current = await this.#assessLease(filePath);
-      if (current && current.runId !== lease.runId) return;
+      if (released || lost) return;
+      if (current && current.runId !== lease.runId) return markLost(current);
+      if (!current) {
+        // The file vanished; recreate exclusively so a racing new owner is
+        // never overwritten — EEXIST here means we lost the lock.
+        try {
+          await writeFile(filePath, JSON.stringify({ ...lease, heartbeatAt: nowIso() }), { flag: "wx" });
+        } catch (error) {
+          if (error.code !== "EEXIST") return;
+          const winner = await this.#assessLease(filePath);
+          if (winner && winner.runId !== lease.runId) markLost(winner);
+        }
+        return;
+      }
       await atomicWrite(filePath, { ...lease, heartbeatAt: nowIso() });
     };
+    // Deliberately ref'd: a held lease IS an active run, and the fence depends
+    // on the next tick firing even when nothing else keeps the loop alive. All
+    // exit paths clear it (release() runs in the orchestrator's finally,
+    // markLost clears it on loss), so it cannot outlive the run.
     const timer = setInterval(() => {
       refresh(this.#leasePath(taskId), taskLease).catch(() => {});
       if (workspaceLock) refresh(workspaceLock.path, workspaceLock.lease).catch(() => {});
     }, this.leaseHeartbeatMs);
-    timer.unref();
 
     return {
       ...taskLease,
       release: async () => {
+        released = true;
         clearInterval(timer);
         const currentTask = await this.#assessLease(this.#leasePath(taskId));
         if (!currentTask || currentTask.runId === runId) {
@@ -463,10 +492,13 @@ export class TaskStore {
     }
     const age = Date.now() - new Date(lease.heartbeatAt).getTime();
     const fresh = Number.isFinite(age) && age < this.staleLeaseMs;
-    // A same-host lease can be checked directly; a lease from another host can
-    // only be judged by how recently it was renewed.
     const sameHost = lease.host === this.hostname;
-    const alive = sameHost ? fresh && isProcessAlive(lease.pid) : fresh;
+    // Same host: the PID can be probed directly, and a live PID is a live
+    // holder even if its heartbeat paused (a SIGSTOPped process resumes and
+    // keeps writing; taking its lock over would create two writers). Only a
+    // gone PID is reclaimable. Other hosts cannot be probed, so heartbeat
+    // freshness is the only available signal there.
+    const alive = sameHost ? isProcessAlive(lease.pid) : fresh;
     return { ...lease, alive, stale: !alive };
   }
 

@@ -1,3 +1,4 @@
+import "./_hang-watchdog.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { totalUsage, usageFromClaude, usageFromCodex } from "../src/usage.js";
