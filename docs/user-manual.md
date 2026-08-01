@@ -120,6 +120,24 @@ agent-office serve --config ./examples/team.dashboard-demo.json
 
 浏览器打开 <http://127.0.0.1:4177>，新建一个任务并点击“启动协作”，即可看到 mock builder/reviewer 的完整返工闭环、路由计划和产物列表。
 
+### 3.3 真实项目的一条命令入口
+
+进入目标项目后运行：
+
+```bash
+agent-office start
+```
+
+这条命令把真实项目所需的准备步骤串起来：
+
+1. 检查当前目录的 `agent-office.json`；
+2. 配置不存在时请求确认，确认后生成默认 Codex + Claude 配置；
+3. 运行 `doctor` 检查配置中的代理和本机 CLI；
+4. 体检通过后在 `127.0.0.1:4177` 启动服务；
+5. 服务监听成功后自动打开浏览器。
+
+如果用户取消初始化，不会写入文件；如果 `doctor` 发现不可用代理，服务不会启动。macOS 上，`start`、`serve` 和 `run` 会在进程尚未显式设置 `HTTP_PROXY` / `HTTPS_PROXY` 时读取系统代理，并把它传给代理 CLI；项目配置中的 `agents[].env` 最后合并，仍具有最高优先级。这解决了部分原生 CLI 能打开交互界面、却不读取 macOS 系统代理而在无头模式报 `ENOTFOUND` 的情况。当前终端保持为服务的进程宿主，按 `Ctrl+C` 安全停止。
+
 ---
 
 ## 4. 在真实项目里运行
@@ -335,6 +353,7 @@ agent-office run task-20260731-1a2b3c4d
 
 ```text
 agent-office init [directory]
+agent-office start
 agent-office doctor [--config path]
 agent-office capabilities [--refresh] [--objective "..."] [--json] [--config path]
 agent-office task create --objective "..." [--config path]
@@ -345,7 +364,7 @@ agent-office task unarchive <task-id> [--config path]
 agent-office task delete <task-id> --yes [--config path]
 agent-office message send <task-id> --body "..." [--to agent|team] [--config path]
 agent-office run <task-id> [--rounds N] [--config path]
-agent-office serve [--host 127.0.0.1] [--port 4177] [--config path]
+agent-office serve [--host 127.0.0.1] [--port 4177] [--open] [--config path]
 agent-office demo
 ```
 
@@ -354,6 +373,8 @@ agent-office demo
 ### 6.1 各命令说明
 
 **`init [directory]`** — 在目标目录写入起始配置。目录不存在会自动创建。**不会覆盖已存在的配置。**
+
+**`start`** — 面向真实项目的一条命令入口。以当前目录为项目，必要时确认初始化，运行 `doctor`，启动控制台并自动打开浏览器。环境检查失败时不会启动服务。
 
 **`doctor`** — 强制刷新能力探测并打印每个代理的可用性、版本、安全模式、模型、可用工具和告警。
 
@@ -376,7 +397,7 @@ agent-office demo
 
 **`run <task-id> [--rounds N]`** — 推进任务。`--rounds` 必须是正整数，覆盖 `collaboration.maxRounds`。
 
-**`serve [--host] [--port]`** — 启动本地控制台。`--host` 只接受 `127.0.0.1`、`localhost`、`::1`；`--port` 为 1–65535。
+**`serve [--host] [--port] [--open]`** — 启动本地控制台。`--host` 只接受 `127.0.0.1`、`localhost`、`::1`；`--port` 为 1–65535；`--open` 在服务监听成功后打开浏览器。
 
 **`demo`** — 在临时目录跑离线闭环演示。
 
@@ -1089,4 +1110,5 @@ Claude Code 会用自带的元 schema 校验 `--json-schema`，并拒绝无法�
 - [README](../README.md) — 项目概览与快速开始
 - [架构文档](architecture.md) — 组件、决策与扩展路线
 - [协作协议](protocol.md) — Turn Protocol 详细说明
+- [一键启动器与桌面壳实施计划](future-launcher-plan.md) — 未来的一键初始化、环境检查和控制台启动流程
 - [`schemas/turn.schema.json`](../schemas/turn.schema.json) — 正式 Schema

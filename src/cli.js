@@ -1,6 +1,8 @@
 import path from "node:path";
 import os from "node:os";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
 import { normalizeConfig, writeStarterConfig } from "./config.js";
 import { RunLeaseError } from "./errors.js";
 import { totalUsage } from "./usage.js";
@@ -9,10 +11,16 @@ import { loadTurnSchema } from "./protocol.js";
 import { Orchestrator } from "./orchestrator.js";
 import { createRuntime, DEFAULT_SCHEMA_PATH } from "./runtime.js";
 import { DashboardServer } from "./server.js";
+import { exists } from "./utils.js";
+import { inheritMacSystemProxy } from "./system-proxy.js";
 
-export async function runCli(argv, io = console) {
+export async function runCli(argv, io = console, options = {}) {
   const args = [...argv];
   const command = args.shift() ?? "help";
+
+  if (["start", "run", "serve"].includes(command)) {
+    await prepareNetworkEnvironment(io, options);
+  }
 
   switch (command) {
     case "help":
@@ -22,6 +30,8 @@ export async function runCli(argv, io = console) {
       return 0;
     case "init":
       return initCommand(args, io);
+    case "start":
+      return startCommand(args, io, options);
     case "doctor":
       return doctorCommand(args, io);
     case "capabilities":
@@ -33,11 +43,76 @@ export async function runCli(argv, io = console) {
     case "run":
       return runTaskCommand(args, io);
     case "serve":
-      return serveCommand(args, io);
+      return serveCommand(args, io, options);
     case "demo":
       return demoCommand(io);
     default:
       throw new Error(`Unknown command: ${command}\n\n${usage()}`);
+  }
+}
+
+async function prepareNetworkEnvironment(io, options) {
+  const inheritSystemProxy = options.inheritSystemProxy ?? inheritMacSystemProxy;
+  const { applied } = await inheritSystemProxy();
+  const proxy = applied.HTTPS_PROXY ?? applied.HTTP_PROXY;
+  if (proxy) {
+    io.log(`Using the macOS system proxy for agent processes: ${proxy}`);
+  }
+}
+
+async function startCommand(args, io, options) {
+  rejectExtraArgs(args);
+  const workspace = path.resolve(options.cwd ?? process.cwd());
+  const configPath = path.join(workspace, "agent-office.json");
+  const nodeMajor = Number(process.versions.node.split(".")[0]);
+  if (!Number.isInteger(nodeMajor) || nodeMajor < 20) {
+    throw new Error(`Agent Office requires Node.js 20 or newer; found ${process.version}`);
+  }
+
+  if (!(await exists(configPath))) {
+    io.log(`No agent-office.json found in ${workspace}.`);
+    const confirm = options.confirmInitialization ?? confirmInitialization;
+    if (!(await confirm(workspace))) {
+      io.log("Initialization cancelled; no files were changed.");
+      return 0;
+    }
+    const createdPath = await writeStarterConfig(workspace);
+    io.log(`Created ${createdPath}`);
+  }
+
+  io.log("Checking the configured agents…");
+  const doctor = options.doctor
+    ?? ((value) => doctorCommand(["--config", value], io));
+  if (await doctor(configPath) !== 0) {
+    io.error("Environment check failed; the dashboard was not started.");
+    return 1;
+  }
+
+  io.log("Starting Agent Office and opening the dashboard…");
+  const serve = options.serve
+    ?? ((value, settings) => serveCommand(
+      ["--config", value, ...(settings.open ? ["--open"] : [])],
+      io,
+      options
+    ));
+  return serve(configPath, { open: true });
+}
+
+async function confirmInitialization(workspace) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error(
+      `Configuration not found in ${workspace}. Run "agent-office init" first, `
+      + "or run \"agent-office start\" in an interactive terminal."
+    );
+  }
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await prompt.question(
+      "Initialize this project with the default Codex + Claude configuration? [y/N] "
+    );
+    return /^(y|yes)$/i.test(answer.trim());
+  } finally {
+    prompt.close();
   }
 }
 
@@ -264,10 +339,11 @@ async function runTaskCommand(args, io) {
   return task.status === "failed" ? 1 : 0;
 }
 
-async function serveCommand(args, io) {
+async function serveCommand(args, io, options = {}) {
   const configPath = takeOption(args, "--config") ?? "agent-office.json";
   const host = takeOption(args, "--host") ?? "127.0.0.1";
   const port = parsePort(takeOption(args, "--port") ?? "4177");
+  const shouldOpen = takeFlag(args, "--open");
   rejectExtraArgs(args);
   if (!["127.0.0.1", "localhost", "::1"].includes(host)) {
     throw new Error("The dashboard only binds to a loopback host: 127.0.0.1, localhost, or ::1");
@@ -279,6 +355,14 @@ async function serveCommand(args, io) {
   io.log(`Agent Office dashboard: ${url}`);
   io.log(`Workspace: ${runtime.config.workspace}`);
   io.log("Press Ctrl+C to stop.");
+  if (shouldOpen) {
+    try {
+      await (options.openUrl ?? openDashboard)(url);
+    } catch (error) {
+      io.error(`Could not open the browser automatically: ${error.message}`);
+      io.error(`Open this address manually: ${url}`);
+    }
+  }
 
   await new Promise((resolve) => {
     const shutdown = async () => {
@@ -291,6 +375,21 @@ async function serveCommand(args, io) {
     process.on("SIGTERM", shutdown);
   });
   return 0;
+}
+
+async function openDashboard(url) {
+  const command = process.platform === "darwin"
+    ? "open"
+    : process.platform === "win32"
+      ? "cmd"
+      : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  await new Promise((resolve, reject) => {
+    execFile(command, args, { timeout: 10_000 }, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }
 
 async function demoCommand(io) {
@@ -474,6 +573,7 @@ function usage() {
 
 Usage:
   agent-office init [directory]
+  agent-office start
   agent-office doctor [--config path]
   agent-office capabilities [--refresh] [--objective "..."] [--json] [--config path]
   agent-office task create --objective "..." [--config path]
@@ -484,7 +584,7 @@ Usage:
   agent-office task delete <task-id> --yes [--config path]
   agent-office message send <task-id> --body "..." [--to agent|team] [--config path]
   agent-office run <task-id> [--rounds N] [--config path]
-  agent-office serve [--host 127.0.0.1] [--port 4177] [--config path]
+  agent-office serve [--host 127.0.0.1] [--port 4177] [--open] [--config path]
   agent-office demo
 
 The default configuration connects Codex and Claude Code to one shared workspace.

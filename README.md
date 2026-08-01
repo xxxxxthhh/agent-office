@@ -55,6 +55,15 @@ builder 实现
 
 ## 本地可视化控制台
 
+在真实项目里，最短入口是一条命令：
+
+```bash
+cd /path/to/your-project
+agent-office start
+```
+
+`start` 会检查当前目录是否已有 `agent-office.json`；没有时先在终端请求确认，确认后生成默认 Codex + Claude 配置。随后它运行环境体检，只有配置中的代理都可用才启动控制台，并在服务监听成功后自动打开浏览器。macOS 上，如果当前进程没有显式的 `HTTP_PROXY` / `HTTPS_PROXY`，启动器会继承系统网络设置中的代理（例如 Clash Verge），供不直接读取 macOS 系统代理的无头 CLI 使用；`agents[].env` 仍可覆盖它。当前终端是服务的进程宿主，按 `Ctrl+C` 会安全停止控制台和它启动的运行。
+
 在已经执行过 `agent-office init` 的项目中启动：
 
 ```bash
@@ -241,6 +250,7 @@ cd /path/to/your-project
 
 ```text
 agent-office init [directory]
+agent-office start
 agent-office doctor [--config path]
 agent-office capabilities [--refresh] [--objective "..."] [--json] [--config path]
 agent-office task create --objective "..." [--config path]
@@ -251,7 +261,7 @@ agent-office task unarchive <task-id> [--config path]
 agent-office task delete <task-id> --yes [--config path]
 agent-office message send <task-id> --body "..." [--to agent|team] [--config path]
 agent-office run <task-id> [--rounds N] [--config path]
-agent-office serve [--host 127.0.0.1] [--port 4177] [--config path]
+agent-office serve [--host 127.0.0.1] [--port 4177] [--open] [--config path]
 agent-office demo
 ```
 
@@ -295,4 +305,4 @@ npm run check
 
 测试有两层挂起防护：每个测试文件内置句柄看门狗（worker 存活超过 120 秒即打印持有句柄并失败退出），整个 `node --test` 运行由 `tools/run-tests.mjs` 从外部监督（默认 240 秒死线，`AGENT_OFFICE_TEST_DEADLINE_MS` 可调）。supervisor 为每次运行注入唯一 PID ledger：Node 后代会按进程实例自登记，Node（含 Worker thread）发起的直接子进程也会在 spawn 时登记，所以清理不依赖 `ps`，launcher 退出、后代被重新挂到 PID 1 或另建进程组后仍可定位；正常完成同样会清理登记进程。超时打印 ledger 中的存活进程、强制清理并以 124 退出；`SIGINT`/`SIGTERM` 会先转发、再升级清理，连续信号也不会绕过 supervisor。Windows 使用登记 PID 强制终止再辅以 `taskkill /T`，但本项目只在 macOS 验证过该轮回归。进程实例 ID 可防止延迟 stop 误删新记录；若进程异常消失后 OS 在同一次短测试内立刻复用其 PID，缺少 job object/pidfd 的平台仍无法从 PID 本身证明代际。另一条已知逃逸链：若某个 Node 中间进程被显式剥离 `NODE_OPTIONS` 启动（它本身仍会被父进程在 spawn 现场登记），它再派生的 detached 后代既不在 ledger 也不在 runner 进程组内，清理无法覆盖——第一方测试不使用该模式，彻底关闭同样需要 pidfd/job object 一类的 OS 级句柄。发布包包含这套测试，并通过真实打包安装回归确认 `npm test` 至少执行一个测试，不会以零测试假绿。任何防护触发都是确定性失败，而不是静默等待。
 
-更多设计说明见 [架构文档](docs/architecture.md) 和 [协作协议](docs/protocol.md)。
+更多设计说明见 [架构文档](docs/architecture.md)、[协作协议](docs/protocol.md) 和[一键启动器与桌面壳实施计划](docs/future-launcher-plan.md)。
