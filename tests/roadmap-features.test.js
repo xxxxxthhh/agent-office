@@ -85,6 +85,40 @@ test("the failure cause is stored on the participant and in the transcript", asy
   assert.match(settled.messages.at(-1).body, /sandbox denied write/);
 });
 
+test("a successful retry clears the participant's stale failure warning", async (context) => {
+  const { AdapterError } = await import("../src/errors.js");
+  let attempts = 0;
+  const { orchestrator, store } = await scaffold(context, {
+    runTurn: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new AdapterError("claude exited with code 1", {
+          code: 1,
+          stderr: "temporary network failure\n",
+          command: "claude"
+        });
+      }
+      return doneTurn();
+    }
+  });
+  const task = await orchestrator.createTask("Implement a change.");
+
+  const failed = await orchestrator.runTask(task.id);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.participants.worker.lastFailure.exitCode, 1);
+
+  await store.addMessage(task.id, {
+    from: "user",
+    to: "worker",
+    body: "Please retry now."
+  });
+  const recovered = await orchestrator.runTask(task.id);
+
+  assert.equal(recovered.status, "completed");
+  assert.equal(recovered.participants.worker.status, "done");
+  assert.equal(recovered.participants.worker.lastFailure, undefined);
+});
+
 // --- A2: prompt budget -------------------------------------------------------
 
 test("caps the transcript so the prompt cannot grow without bound", async (context) => {

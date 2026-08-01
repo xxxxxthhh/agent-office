@@ -350,6 +350,7 @@ export class Orchestrator {
       participant.turns += 1;
       participant.lastTurnAt = at;
       participant.lastSummary = response.summary;
+      delete participant.lastFailure;
       participant.artifacts = [...new Set([...participant.artifacts, ...response.artifacts])];
 
       task.turns.push({
