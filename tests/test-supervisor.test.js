@@ -419,20 +419,32 @@ test("the process ledger tracks a detached promisified execFile child", async (c
   const scratch = await mkdtemp(path.join(os.tmpdir(), "agent-office-supervisor-promisify-detached-"));
   context.after(() => rm(scratch, { recursive: true, force: true }));
   const marker = path.join(scratch, "detached.json");
+  const launcher = path.join(scratch, "launcher.mjs");
   const hanging = path.join(scratch, "promisify-detached.test.mjs");
-  const python = [
-    "import json, os, time",
-    "os.setsid()",
-    `open(${JSON.stringify(marker)}, "w").write(json.dumps({"detachedPid": os.getpid()}))`,
-    "time.sleep(60)"
-  ].join("; ");
-  await writeFile(hanging, `
-    import test from "node:test";
+  // The launcher is spawned detached, so its whole subtree lives outside the
+  // runner's process group and the group-kill fallback cannot reach it. The
+  // hanging child is started via promisify(execFile) WITH a stripped env, so it
+  // does not preload the ledger and cannot self-register: the ONLY way cleanup
+  // can find it is the promisify.custom spawn-site registration under test.
+  // (A plain inherited-env node child would self-register and mask exactly the
+  // mechanism this guard exists for.)
+  await writeFile(launcher, `
     import { execFile } from "node:child_process";
     import { promisify } from "node:util";
-    test("hangs in a detached execFile", async () => {
-      await promisify(execFile)("/usr/bin/python3", ["-c", ${JSON.stringify(python)}]);
+    await promisify(execFile)(process.execPath, ["-e", \`
+      require("node:fs").writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ detachedPid: process.pid }));
+      setInterval(() => {}, 1000);
+    \`], { env: { PATH: process.env.PATH } });
+  `);
+  await writeFile(hanging, `
+    import test from "node:test";
+    import { spawn } from "node:child_process";
+    const launcher = spawn(process.execPath, [${JSON.stringify(launcher)}], {
+      detached: true,
+      stdio: "ignore"
     });
+    launcher.unref();
+    test("hangs forever", () => new Promise(() => { setInterval(() => {}, 1000); }));
   `);
   const markerPromise = waitForJson(marker);
   const resultPromise = runSupervisor(
