@@ -10,12 +10,14 @@ export function runProcess({
   cwd,
   input = "",
   env = {},
+  inheritEnv = true,
   timeoutMs = 600_000
 }) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: { ...process.env, ...env },
+      env: inheritEnv ? { ...process.env, ...env } : { ...env },
+      detached: process.platform !== "win32",
       shell: false,
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -24,20 +26,15 @@ export function runProcess({
     let stderr = "";
     let settled = false;
     let outputLimitExceeded = false;
+    let timedOut = false;
+    let forceKillTimer = null;
 
     const timer = setTimeout(() => {
       if (settled) return;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 500).unref();
-      finishReject(
-        new AdapterError(`Process timed out after ${timeoutMs} ms: ${command}`, {
-          command,
-          args,
-          stdout: truncate(stdout),
-          stderr: truncate(stderr),
-          timedOut: true
-        })
-      );
+      timedOut = true;
+      signalProcessTree(child, "SIGTERM");
+      forceKillTimer = setTimeout(() => signalProcessTree(child, "SIGKILL"), 500);
+      forceKillTimer.unref();
     }, timeoutMs);
     timer.unref();
 
@@ -47,14 +44,18 @@ export function runProcess({
       stdout += chunk;
       if (Buffer.byteLength(stdout) > MAX_CAPTURE_BYTES) {
         outputLimitExceeded = true;
-        child.kill("SIGTERM");
+        signalProcessTree(child, "SIGTERM");
+        forceKillTimer ??= setTimeout(() => signalProcessTree(child, "SIGKILL"), 500);
+        forceKillTimer.unref();
       }
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
       if (Buffer.byteLength(stderr) > MAX_CAPTURE_BYTES) {
         outputLimitExceeded = true;
-        child.kill("SIGTERM");
+        signalProcessTree(child, "SIGTERM");
+        forceKillTimer ??= setTimeout(() => signalProcessTree(child, "SIGKILL"), 500);
+        forceKillTimer.unref();
       }
     });
 
@@ -78,6 +79,20 @@ export function runProcess({
             signal,
             stdout: truncate(stdout),
             stderr: truncate(stderr)
+          })
+        );
+        return;
+      }
+      if (timedOut) {
+        finishReject(
+          new AdapterError(`Process timed out after ${timeoutMs} ms: ${command}`, {
+            command,
+            args,
+            code,
+            signal,
+            stdout: truncate(stdout),
+            stderr: truncate(stderr),
+            timedOut: true
           })
         );
         return;
@@ -107,6 +122,7 @@ export function runProcess({
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(forceKillTimer);
       resolve(result);
     }
 
@@ -114,7 +130,24 @@ export function runProcess({
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(forceKillTimer);
       reject(error);
     }
   });
+}
+
+function signalProcessTree(child, signal) {
+  if (process.platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch (error) {
+    if (error.code !== "ESRCH") throw error;
+  }
 }

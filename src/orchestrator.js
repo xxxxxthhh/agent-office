@@ -44,6 +44,12 @@ export class Orchestrator {
     const maxRounds = options.maxRounds ?? this.config.collaboration.maxRounds;
     const onEvent = options.onEvent ?? (() => {});
     let task = await this.store.loadTask(taskId);
+    if (task.mode === "workflow") {
+      if (!this.workflowOrchestrator) {
+        throw new ConfigError("Workflow task requires a WorkflowOrchestrator runtime");
+      }
+      return this.workflowOrchestrator.runWorkflow(taskId, options);
+    }
     this.#assertTaskRoster(task);
     if (["completed", "awaiting_input", "failed"].includes(task.status)) return task;
     if (this.capabilityRegistry) {
@@ -140,6 +146,10 @@ export class Orchestrator {
     task = await this.store.loadTask(taskId);
     onEvent({ type: "run.finished", taskId, status: task.status });
     return task;
+  }
+
+  setWorkflowOrchestrator(workflowOrchestrator) {
+    this.workflowOrchestrator = workflowOrchestrator;
   }
 
   describeAgents() {

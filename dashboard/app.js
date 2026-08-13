@@ -136,6 +136,10 @@ function connectStream() {
       toast(`${payload.agentId} 完成本轮 · ${payload.response.status}`);
     } else if (payload.type === "turn.failed") {
       toast(`${payload.agentId} 运行失败`, "danger");
+    } else if (payload.type === "workflow.node_succeeded") {
+      toast(`${payload.nodeId} 节点已完成`);
+    } else if (payload.type === "workflow.node_failed") {
+      toast(`${payload.nodeId} 节点失败`, "danger");
     }
     scheduleRefresh();
   });
@@ -227,7 +231,7 @@ function renderTask() {
     : task.status === "completed"
       ? "任务已完成"
       : task.status === "awaiting_input"
-        ? "等待输入"
+        ? "在下方处理审批或重试"
         : task.status === "failed"
           ? "发送消息后重试"
         : "启动协作";
@@ -299,6 +303,10 @@ function renderAgents(task) {
 }
 
 function renderRouting(task) {
+  if (task.mode === "workflow") {
+    renderWorkflow(task);
+    return;
+  }
   const routing = task.routing;
   elements.routingPlan.replaceChildren();
   if (!routing?.assignments?.length) {
@@ -331,6 +339,68 @@ function renderRouting(task) {
     item.append(order, body);
     elements.routingPlan.append(item);
   }
+}
+
+function renderWorkflow(task) {
+  const workflow = task.workflow;
+  elements.routingPlan.replaceChildren();
+  elements.routingSummary.textContent = `${workflow.runtime} · 最大并行 ${workflow.maxConcurrency}`;
+  for (const nodeId of workflow.order) {
+    const node = workflow.nodes[nodeId];
+    const item = create("article", { className: "route-item workflow-node" });
+    const order = create("span", {
+      className: "route-order",
+      text: workflow.order.indexOf(nodeId) + 1
+    });
+    const body = create("div", { className: "route-body" });
+    const title = create("div", { className: "route-title" });
+    title.append(
+      create("strong", { text: node.id }),
+      statusChip(node.status)
+    );
+    body.append(
+      title,
+      create("p", {
+        text: `${node.type}${node.owner ? ` · ${node.owner}` : ""}`
+          + `${node.dependsOn.length ? ` · 等待 ${node.dependsOn.join(", ")}` : " · 起始节点"}`
+      })
+    );
+    if (node.status === "awaiting_approval") {
+      body.append(workflowActionButton("批准并继续", task.id, node.id, "approve"));
+    } else if (["blocked", "failed"].includes(node.status)) {
+      body.append(workflowActionButton("重试节点", task.id, node.id, "retry"));
+    } else if (
+      node.status === "succeeded"
+      && ["agent", "command"].includes(node.type)
+    ) {
+      body.append(workflowActionButton("按审查意见返工", task.id, node.id, "retry"));
+    }
+    item.append(order, body);
+    elements.routingPlan.append(item);
+  }
+}
+
+function workflowActionButton(label, taskId, nodeId, action) {
+  const button = create("button", {
+    className: "button button-quiet workflow-action",
+    text: label,
+    attrs: { type: "button" }
+  });
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await api(`/api/tasks/${taskId}/nodes/${nodeId}/${action}`, {
+        method: "POST",
+        body: {}
+      });
+      toast(action === "approve" ? "审批已记录" : "节点已准备重试");
+      await refreshAll();
+    } catch (error) {
+      toast(error.message, "danger");
+      button.disabled = false;
+    }
+  });
+  return button;
 }
 
 function renderConversation(task) {

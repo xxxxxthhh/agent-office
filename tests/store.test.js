@@ -66,3 +66,26 @@ test("recovers an abandoned, empty state lock after the stale threshold", async 
 
   assert.match(task.id, /^task-/);
 });
+
+test("heartbeats a live state lock so a slow writer is not mistaken for an abandoned writer", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-office-live-lock-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = new TaskStore(root, { staleLockMs: 30, lockTimeoutMs: 2_000 });
+  const task = await store.createTask("Preserve the live writer.", [
+    { id: "worker", adapter: "mock", role: "Work." }
+  ]);
+  let entered;
+  const enteredPromise = new Promise((resolve) => { entered = resolve; });
+  const slow = store.updateTask(task.id, "test.slow", async (current) => {
+    entered();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    current.slowWriterCompleted = true;
+  });
+  await enteredPromise;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const message = store.addMessage(task.id, { from: "user", to: "team", body: "after slow writer" });
+  await Promise.all([slow, message]);
+  const saved = await store.loadTask(task.id);
+  assert.equal(saved.slowWriterCompleted, true);
+  assert.equal(saved.messages.at(-1).body, "after slow writer");
+});

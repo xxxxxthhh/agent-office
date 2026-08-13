@@ -1,6 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile } from "node:fs/promises";
 import { normalizeConfig, writeStarterConfig } from "./config.js";
 import { TaskStore } from "./store.js";
 import { loadTurnSchema } from "./protocol.js";
@@ -26,6 +26,8 @@ export async function runCli(argv, io = console) {
       return capabilitiesCommand(args, io);
     case "task":
       return taskCommand(args, io);
+    case "workflow":
+      return workflowCommand(args, io);
     case "message":
       return messageCommand(args, io);
     case "run":
@@ -185,6 +187,46 @@ async function messageCommand(args, io) {
   const message = await runtime.store.addMessage(taskId, { from: "user", to, body });
   io.log(`Sent message ${message.sequence} to ${to}`);
   return 0;
+}
+
+async function workflowCommand(args, io) {
+  const subcommand = args.shift();
+  const configPath = takeOption(args, "--config") ?? "agent-office.json";
+  const runtime = await createRuntime(configPath);
+
+  if (subcommand === "create") {
+    const objective = takeOption(args, "--objective");
+    const file = takeOption(args, "--file");
+    if (!objective) throw new Error("workflow create requires --objective");
+    if (!file) throw new Error("workflow create requires --file");
+    rejectExtraArgs(args);
+    const definition = JSON.parse(await readFile(path.resolve(file), "utf8"));
+    const task = await runtime.workflowOrchestrator.createWorkflow(objective, definition);
+    io.log(task.id);
+    return 0;
+  }
+
+  if (subcommand === "approve") {
+    const taskId = args.shift();
+    const nodeId = args.shift();
+    if (!taskId || !nodeId) throw new Error("workflow approve requires a task id and node id");
+    rejectExtraArgs(args);
+    await runtime.store.approveWorkflowNode(taskId, nodeId);
+    io.log(`Approved ${taskId}/${nodeId}`);
+    return 0;
+  }
+
+  if (subcommand === "retry") {
+    const taskId = args.shift();
+    const nodeId = args.shift();
+    if (!taskId || !nodeId) throw new Error("workflow retry requires a task id and node id");
+    rejectExtraArgs(args);
+    await runtime.store.retryWorkflowNode(taskId, nodeId);
+    io.log(`Retry ready: ${taskId}/${nodeId}`);
+    return 0;
+  }
+
+  throw new Error("workflow requires one of: create, approve, retry");
 }
 
 async function runTaskCommand(args, io) {
@@ -349,10 +391,19 @@ function printRunEvent(event, io) {
     io.log(`✓ ${event.agentId}: ${oneLine(event.response.summary, 100)} [${event.response.status}]`);
   } else if (event.type === "turn.failed") {
     io.error(`✗ ${event.agentId}: ${event.error}`);
+  } else if (event.type === "workflow.node_started") {
+    io.log(`→ node ${event.nodeId}: ${event.workspace}`);
+  } else if (event.type === "workflow.node_succeeded") {
+    io.log(`✓ node ${event.nodeId}: succeeded`);
+  } else if (event.type === "workflow.node_blocked") {
+    io.log(`! node ${event.nodeId}: blocked`);
+  } else if (event.type === "workflow.node_failed") {
+    io.error(`✗ node ${event.nodeId}: ${event.error}`);
   }
 }
 
 function formatTask(task) {
+  if (task.mode === "workflow") return formatWorkflowTask(task);
   const lines = [
     `${task.id} — ${task.status}`,
     `Objective: ${task.objective}`,
@@ -366,6 +417,30 @@ function formatTask(task) {
       + `${participant.assignment?.modelLabel ? `, model=${participant.assignment.modelLabel}` : ""}`
       + `${participant.assignment?.effort ? `, effort=${participant.assignment.effort}` : ""}`
       + `${participant.lastSummary ? ` — ${oneLine(participant.lastSummary, 90)}` : ""}`
+    );
+  }
+  lines.push("Conversation:");
+  for (const message of task.messages) {
+    lines.push(`  [${message.sequence}] ${message.from} -> ${message.to}: ${oneLine(message.body, 120)}`);
+  }
+  return lines.join("\n");
+}
+
+function formatWorkflowTask(task) {
+  const lines = [
+    `${task.id} — ${task.status}`,
+    `Objective: ${task.objective}`,
+    `Workflow: ${task.workflow.runtime}, concurrency=${task.workflow.maxConcurrency}`,
+    "Nodes:"
+  ];
+  for (const nodeId of task.workflow.order) {
+    const node = task.workflow.nodes[nodeId];
+    lines.push(
+      `  ${node.id}: ${node.status}, type=${node.type}`
+      + `${node.owner ? `, owner=${node.owner}` : ""}`
+      + `${node.attempts ? `, attempts=${node.attempts}/${node.maxAttempts}` : ""}`
+      + `${node.result?.summary ? ` — ${oneLine(node.result.summary, 90)}` : ""}`
+      + `${node.error ? ` — ${oneLine(node.error, 90)}` : ""}`
     );
   }
   lines.push("Conversation:");
@@ -390,6 +465,9 @@ Usage:
   agent-office task create --objective "..." [--config path]
   agent-office task list [--config path]
   agent-office task show <task-id> [--json] [--config path]
+  agent-office workflow create --objective "..." --file workflow.json [--config path]
+  agent-office workflow approve <task-id> <node-id> [--config path]
+  agent-office workflow retry <task-id> <node-id> [--config path]
   agent-office message send <task-id> --body "..." [--to agent|team] [--config path]
   agent-office run <task-id> [--rounds N] [--config path]
   agent-office serve [--host 127.0.0.1] [--port 4177] [--config path]

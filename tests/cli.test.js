@@ -24,7 +24,11 @@ test("offline demo completes a review-feedback loop", async () => {
 
 test("init, create, list, and show form a usable CLI workflow", async (context) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-cli-"));
-  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const stateDir = path.join(workspace, "..", `${path.basename(workspace)}-state`);
+  context.after(async () => {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(stateDir, { recursive: true, force: true });
+  });
   const configPath = path.join(workspace, "agent-office.json");
 
   const initialized = await runProcess({
@@ -36,6 +40,8 @@ test("init, create, list, and show form a usable CLI workflow", async (context) 
   assert.match(initialized.stdout, /Created .*agent-office\.json/);
   const config = JSON.parse(await readFile(configPath, "utf8"));
   assert.deepEqual(config.agents.map((agent) => agent.id), ["codex", "claude"]);
+  config.stateDir = stateDir;
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
   const created = await runProcess({
     command: process.execPath,
@@ -119,4 +125,86 @@ test("capabilities reports a task-specific routing plan as JSON", async (context
   assert.equal(payload.inventory.totals.availableAgents, 1);
   assert.equal(payload.plan.assignments[0].agentId, "offline");
   assert.equal(payload.plan.assignments[0].model, "fast");
+});
+
+test("creates, runs, approves, and shows a v2 workflow through the CLI", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-cli-workflow-"));
+  const stateDir = `${workspace}-state`;
+  context.after(async () => {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  const configPath = path.join(workspace, "agent-office.json");
+  const workflowPath = path.join(workspace, "workflow.json");
+  await writeFile(configPath, JSON.stringify({
+    version: 1,
+    workspace,
+    stateDir,
+    agents: [{
+      id: "planner",
+      adapter: "mock",
+      role: "Prepare the plan.",
+      replies: [{
+        summary: "Plan is ready.",
+        status: "done",
+        messages: [],
+        artifacts: [],
+        needsUser: false
+      }]
+    }]
+  }));
+  await writeFile(workflowPath, JSON.stringify({
+    version: 1,
+    nodes: [
+      { id: "plan", owner: "planner" },
+      { id: "gate", type: "approval", dependsOn: ["plan"], prompt: "Approve the plan." }
+    ]
+  }));
+  await runProcess({ command: "git", args: ["init"], cwd: workspace });
+  await runProcess({ command: "git", args: ["config", "user.email", "test@example.com"], cwd: workspace });
+  await runProcess({ command: "git", args: ["config", "user.name", "Test"], cwd: workspace });
+  await runProcess({ command: "git", args: ["add", "."], cwd: workspace });
+  await runProcess({ command: "git", args: ["commit", "-m", "fixture"], cwd: workspace });
+  const created = await runProcess({
+    command: process.execPath,
+    args: [
+      CLI_PATH, "workflow", "create",
+      "--config", configPath,
+      "--objective", "Exercise the v2 workflow CLI.",
+      "--file", workflowPath
+    ],
+    cwd: PACKAGE_ROOT,
+    timeoutMs: 10_000
+  });
+  const taskId = created.stdout.trim();
+  const firstRun = await runProcess({
+    command: process.execPath,
+    args: [CLI_PATH, "run", taskId, "--config", configPath],
+    cwd: PACKAGE_ROOT,
+    timeoutMs: 10_000
+  });
+  assert.match(firstRun.stdout, /node plan: succeeded/);
+  assert.match(firstRun.stdout, /awaiting_input/);
+  await runProcess({
+    command: process.execPath,
+    args: [CLI_PATH, "workflow", "approve", taskId, "gate", "--config", configPath],
+    cwd: PACKAGE_ROOT,
+    timeoutMs: 10_000
+  });
+  const finalRun = await runProcess({
+    command: process.execPath,
+    args: [CLI_PATH, "run", taskId, "--config", configPath],
+    cwd: PACKAGE_ROOT,
+    timeoutMs: 10_000
+  });
+  assert.match(finalRun.stdout, /completed/);
+  const shown = await runProcess({
+    command: process.execPath,
+    args: [CLI_PATH, "task", "show", taskId, "--json", "--config", configPath],
+    cwd: PACKAGE_ROOT,
+    timeoutMs: 10_000
+  });
+  const task = JSON.parse(shown.stdout);
+  assert.equal(task.mode, "workflow");
+  assert.equal(task.workflow.nodes.gate.status, "succeeded");
 });
