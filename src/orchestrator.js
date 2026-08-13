@@ -47,13 +47,11 @@ export class Orchestrator {
     const externalSignal = options.signal ?? null;
     const runId = options.runId ?? randomUUID();
     let task = await this.store.loadTask(taskId);
-    if (task.mode === "workflow") {
-      if (!this.workflowOrchestrator) {
-        throw new ConfigError("Workflow task requires a WorkflowOrchestrator runtime");
-      }
-      return this.workflowOrchestrator.runWorkflow(taskId, options);
+    const isWorkflow = task.mode === "workflow";
+    if (isWorkflow && !this.workflowOrchestrator) {
+      throw new ConfigError("Workflow task requires a WorkflowOrchestrator runtime");
     }
-    this.#assertTaskRoster(task);
+    if (!isWorkflow) this.#assertTaskRoster(task);
     if (["completed", "awaiting_input", "failed"].includes(task.status)) return task;
 
     // The run's own controller composes the caller's signal with the lease
@@ -92,8 +90,16 @@ export class Orchestrator {
     try {
       // Inside the try: a failure persisting the baseline must release the
       // leases like any other run failure, not leave them held forever.
-      await this.#ensureWorkspaceBaseline(taskId, task);
-      task = await this.#runRounds(taskId, { maxRounds, onEvent, signal: controller.signal, runId });
+      if (isWorkflow) {
+        task = await this.workflowOrchestrator.runWorkflow(taskId, {
+          ...options,
+          signal: controller.signal,
+          runId
+        });
+      } else {
+        await this.#ensureWorkspaceBaseline(taskId, task);
+        task = await this.#runRounds(taskId, { maxRounds, onEvent, signal: controller.signal, runId });
+      }
     } finally {
       externalSignal?.removeEventListener("abort", onExternalAbort);
       await lease.release();

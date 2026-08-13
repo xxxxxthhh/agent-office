@@ -119,6 +119,39 @@ test("keeps a prepared integration commit retryable after ff-only divergence", a
   );
 });
 
+test("refuses to publish after the target workspace switches branch", async (context) => {
+  const fixture = await integrationFixture(context, "agent-office-target-branch-");
+  const { manager, repository, task, node, worktree } = fixture;
+  node.baselineChanges = await manager.snapshot(worktree);
+  node.workspacePath = worktree;
+  await writeFile(path.join(worktree, "src", "answer.js"), "export const answer = 42;\n");
+  node.verifiedSnapshot = await manager.snapshot(worktree);
+
+  const intent = await manager.prepareIntegration(task, task.workflow.nodes.publish);
+  const originalBranch = intent.targetBranch;
+  const originalHead = (await runProcess({
+    command: "git",
+    args: ["rev-parse", "HEAD"],
+    cwd: repository
+  })).stdout.trim();
+  assert.ok(originalBranch);
+  assert.notEqual(intent.sourceHead, originalHead);
+
+  await runProcess({ command: "git", args: ["checkout", "-b", "wrong-target"], cwd: repository });
+  await assert.rejects(
+    () => manager.publishIntegration(intent),
+    /target branch is wrong-target/
+  );
+  assert.equal(
+    (await runProcess({ command: "git", args: ["rev-parse", originalBranch], cwd: repository })).stdout.trim(),
+    originalHead
+  );
+  assert.equal(
+    (await runProcess({ command: "git", args: ["rev-parse", "wrong-target"], cwd: repository })).stdout.trim(),
+    originalHead
+  );
+});
+
 test("publishes the complete writer history after a review-driven second attempt", async (context) => {
   const fixture = await integrationFixture(context, "agent-office-rework-baseline-");
   const { manager, repository, task, node, worktree } = fixture;

@@ -950,3 +950,32 @@ test("refuses workflow state stored inside an executor workspace", async (contex
     /control state must live outside/
   );
 });
+
+test("rejects a stateDir symlink that resolves inside the executor workspace", async (context) => {
+  const { symlink } = await import("node:fs/promises");
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-state-symlink-"));
+  const hidden = path.join(workspace, ".hidden-state");
+  const alias = `${workspace}-outside-alias`;
+  context.after(async () => {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(alias, { recursive: true, force: true });
+  });
+  await mkdir(hidden, { recursive: true });
+  await symlink(hidden, alias);
+  const config = normalizeConfig({
+    version: 1,
+    workspace,
+    stateDir: alias,
+    agents: [{ id: "alpha", adapter: "mock", role: "Work." }]
+  }, workspace);
+  const store = new TaskStore(config.stateDir);
+  const schema = await loadTurnSchema(SCHEMA_PATH);
+  const orchestrator = new WorkflowOrchestrator({ config, store, schema, schemaPath: SCHEMA_PATH });
+  await assert.rejects(
+    () => orchestrator.createWorkflow("Do not follow a symlink into the workspace.", {
+      version: 1,
+      nodes: [{ id: "one", owner: "alpha" }]
+    }),
+    /control state must live outside/
+  );
+});

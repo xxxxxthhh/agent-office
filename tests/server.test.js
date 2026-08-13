@@ -253,6 +253,53 @@ test("approves a workflow gate through the loopback control API", async (context
   assert.equal(current.status, "ready");
 });
 
+test("health lists an active workflow run and HTTP cancel stops it", async (context) => {
+  const { server, store, workflowOrchestrator } = await createTestServer(context, {
+    externalStateDir: true,
+    agents: [{
+      id: "worker",
+      adapter: "mock",
+      role: "Prepare the workflow.",
+      replies: [{
+        summary: "Preparation completed.",
+        status: "done",
+        messages: [],
+        artifacts: [],
+        needsUser: false
+      }]
+    }]
+  });
+  const task = await workflowOrchestrator.createWorkflow("Cancel through the control API.", {
+    version: 1,
+    nodes: [
+      { id: "prepare", owner: "worker" },
+      {
+        id: "hold",
+        type: "command",
+        dependsOn: ["prepare"],
+        command: process.execPath,
+        args: ["-e", "setTimeout(() => {}, 8000)"]
+      }
+    ]
+  });
+  const started = await jsonRequest(`${server.url}/api/tasks/${task.id}/run`, {});
+  assert.equal(started.status, 202);
+  await waitFor(async () => (await store.readLease(task.id))?.alive);
+
+  const health = await (await fetch(`${server.url}/api/health`)).json();
+  assert.ok(health.activeRuns[task.id], "dashboard health must show the live workflow lease");
+  assert.equal(health.activeRuns[task.id].cancellable, true);
+
+  const denied = await fetch(`${server.url}/api/tasks/${task.id}`, { method: "DELETE" });
+  assert.equal(denied.status, 409);
+
+  const cancelled = await jsonRequest(`${server.url}/api/tasks/${task.id}/cancel`, {});
+  assert.equal(cancelled.status, 202);
+  await waitFor(async () => (await store.readLease(task.id)) === null);
+  const settled = await store.loadTask(task.id);
+  assert.equal(settled.status, "ready");
+});
+
 function jsonRequest(url, body) {
   return fetch(url, {
     method: "POST",

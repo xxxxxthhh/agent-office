@@ -54,7 +54,7 @@ export class ProcessExecutionRuntime {
     this.jobs.delete(handle.id);
   }
 
-  async #runAgent({ node, prompt, workspace, timeoutMs, assignment }) {
+  async #runAgent({ node, prompt, workspace, timeoutMs, assignment, signal }) {
     const adapter = this.adapters.get(node.owner);
     if (!adapter) throw new ConfigError(`No adapter configured for workflow owner "${node.owner}"`);
     return adapter.runTurn({
@@ -62,11 +62,12 @@ export class ProcessExecutionRuntime {
       workspace,
       timeoutMs,
       model: assignment?.model,
-      effort: assignment?.effort
+      effort: assignment?.effort,
+      signal
     });
   }
 
-  async #runCommand({ node, workspace, timeoutMs }) {
+  async #runCommand({ node, workspace, timeoutMs, signal }) {
     const result = await runProcess({
       command: node.command,
       args: node.args,
@@ -76,7 +77,8 @@ export class ProcessExecutionRuntime {
         ...Object.fromEntries(node.envKeys.map((key) => [key, process.env[key] ?? ""]))
       },
       inheritEnv: false,
-      timeoutMs
+      timeoutMs,
+      signal
     });
     const tracePath = this.store.createRunPath(node.id, "command.json");
     await writeFile(tracePath, `${JSON.stringify({

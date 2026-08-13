@@ -49,7 +49,7 @@ flowchart LR
 
 调度器负责轮次、停止条件和状态转换，不负责替代理决定具体实现。创建任务时，能力路由器先保存任务画像和分配快照；后续轮次严格按快照中的代理、模型、推理强度和顺序执行。
 
-`task.mode === "workflow"` 时，`Orchestrator.runTask` 转交给 `WorkflowOrchestrator`。工作流按 DAG ready-set 并行调度，使用任务快照里的 workflow lease（不是串行任务的磁盘租约）。`src/workspace.js` 继续服务串行任务的 baseline / diff；`src/workspaces.js` 服务 workflow 的 worktree 与 `ff-only` 发布。
+`task.mode === "workflow"` 时，`Orchestrator.runTask` 先获取与串行任务相同的磁盘租约、workspace lock 和组合 AbortSignal，再交给 `WorkflowOrchestrator`。工作流另有一份写在快照里的 scheduler lease。两套锁一起用：前者对健康接口、取消、删除和跨模式并发可见，后者挡住第二个 scheduler。`src/workspace.js` 继续服务串行任务的 baseline / diff；`src/workspaces.js` 服务 workflow 的 worktree 与 `ff-only` 发布。
 
 ### Capability registry 与 router
 

@@ -1,8 +1,8 @@
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { ConfigError } from "./errors.js";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { ConfigError, RunCancelledError } from "./errors.js";
 import { createAdapters } from "./adapters/index.js";
 import { normalizeWorkflowDefinition } from "./workflow-definition.js";
 import { WorkspaceManager } from "./workspaces.js";
@@ -36,7 +36,7 @@ export class WorkflowOrchestrator {
   }
 
   async createWorkflow(objective, rawDefinition) {
-    assertControlStateOutsideWorkspace(this.config);
+    await assertControlStateOutsideWorkspace(this.config);
     const definition = normalizeWorkflowDefinition(rawDefinition, this.config);
     const owners = new Set(definition.nodes.filter((node) => node.owner).map((node) => node.owner));
     const agents = this.config.agents.filter((agent) => owners.has(agent.id));
@@ -48,25 +48,35 @@ export class WorkflowOrchestrator {
 
   async runWorkflow(taskId, options = {}) {
     const onEvent = options.onEvent ?? (() => {});
+    const signal = options.signal ?? null;
+    await assertControlStateOutsideWorkspace(this.config);
     let task = await this.store.loadTask(taskId);
     this.#assertWorkflow(task);
     this.#assertRoster(task);
     if (TERMINAL_TASK_STATUSES.has(task.status)) return task;
+    throwIfAborted(signal);
 
     const leaseId = randomUUID();
     await this.#acquireLease(taskId, leaseId);
     const stopHeartbeat = this.#startLeaseHeartbeat(taskId, leaseId);
     try {
-      return await this.#runWorkflowWithLease(taskId, leaseId, onEvent);
+      return await this.#runWorkflowWithLease(taskId, leaseId, onEvent, signal);
+    } catch (error) {
+      if (!isCancellation(error, signal)) throw error;
+      await this.#markCancelled(taskId, leaseId);
+      task = await this.store.loadTask(taskId);
+      onEvent({ type: "run.finished", taskId, status: task.status, cancelled: true });
+      return task;
     } finally {
       stopHeartbeat();
       await this.#releaseLease(taskId, leaseId);
     }
   }
 
-  async #runWorkflowWithLease(taskId, leaseId, onEvent) {
+  async #runWorkflowWithLease(taskId, leaseId, onEvent, signal = null) {
     let task;
 
+    throwIfAborted(signal);
     await this.#reconcile(taskId, leaseId, onEvent);
     await this.store.updateTask(taskId, "workflow.run_started", (current) => {
       this.#assertLease(current, leaseId);
@@ -75,12 +85,13 @@ export class WorkflowOrchestrator {
     onEvent({ type: "workflow.run_started", taskId });
 
     while (true) {
+      throwIfAborted(signal);
       const claimed = await this.#claimReadyNodes(taskId, leaseId);
       for (const node of claimed) {
         onEvent({ type: "workflow.node_dispatched", taskId, nodeId: node.id, attempt: node.attempts });
       }
       if (claimed.length) {
-        await Promise.all(claimed.map((node) => this.#executeNode(taskId, node.id, leaseId, onEvent)));
+        await Promise.all(claimed.map((node) => this.#executeNode(taskId, node.id, leaseId, onEvent, signal)));
         continue;
       }
 
@@ -156,7 +167,7 @@ export class WorkflowOrchestrator {
     }, {});
   }
 
-  async #executeNode(taskId, nodeId, leaseId, onEvent) {
+  async #executeNode(taskId, nodeId, leaseId, onEvent, signal = null) {
     let handle = null;
     let runtime = null;
     let attemptToken = null;
@@ -201,6 +212,7 @@ export class WorkflowOrchestrator {
       node = task.workflow.nodes[nodeId];
       const prompt = this.#buildPrompt(task, node, workspace, resultPath);
       onEvent({ type: "workflow.node_started", taskId, nodeId, workspace });
+      throwIfAborted(signal);
 
       let execution;
       if (node.type === "integration") {
@@ -235,7 +247,8 @@ export class WorkflowOrchestrator {
           workspace,
           timeoutMs: this.#timeoutFor(node),
           attemptToken: node.attemptToken,
-          assignment: task.participants[node.owner]?.assignment ?? null
+          assignment: task.participants[node.owner]?.assignment ?? null,
+          signal
         });
         execution = await runtime.wait(handle);
         if (execution.binding) {
@@ -289,6 +302,10 @@ export class WorkflowOrchestrator {
         changedFiles
       });
     } catch (error) {
+      if (isCancellation(error, signal)) {
+        await this.#reopenCancelledNode(taskId, nodeId, attemptToken, leaseId);
+        throw error;
+      }
       const containment = runtime && handle && typeof runtime.interrupt === "function"
         ? await runtime.interrupt(handle).catch(() => ({ settled: false }))
         : { settled: true };
@@ -651,6 +668,38 @@ export class WorkflowOrchestrator {
     return () => clearInterval(timer);
   }
 
+  async #reopenCancelledNode(taskId, nodeId, attemptToken, leaseId) {
+    await this.store.updateTask(taskId, "workflow.node_cancelled", (task) => {
+      if (leaseId) this.#assertLease(task, leaseId);
+      const node = task.workflow?.nodes?.[nodeId];
+      if (!node || !ACTIVE_NODE_STATUSES.has(node.status)) return;
+      if (attemptToken && node.attemptToken !== attemptToken) return;
+      node.status = "ready";
+      if (node.attempts > 0) node.attempts -= 1;
+      node.attemptToken = null;
+      node.error = null;
+      node.completedAt = null;
+      refreshParticipants(task);
+    }, { nodeId }).catch(() => {});
+  }
+
+  async #markCancelled(taskId, leaseId) {
+    await this.store.updateTask(taskId, "run.cancelled", (task) => {
+      if (leaseId && task.workflow.lease && task.workflow.lease.id !== leaseId) return;
+      for (const node of Object.values(task.workflow.nodes ?? {})) {
+        if (!ACTIVE_NODE_STATUSES.has(node.status)) continue;
+        node.status = "ready";
+        if (node.attempts > 0) node.attempts -= 1;
+        node.attemptToken = null;
+        node.error = null;
+        node.completedAt = null;
+      }
+      if (task.status === "running") task.status = "ready";
+      task.workflow.lease = null;
+      refreshParticipants(task);
+    }, { reason: "cancelled" }).catch(() => {});
+  }
+
   async #releaseLease(taskId, leaseId) {
     await this.store.updateTask(taskId, "workflow.lease_released", (task) => {
       if (task.workflow.lease?.id === leaseId) task.workflow.lease = null;
@@ -664,13 +713,51 @@ export class WorkflowOrchestrator {
   }
 }
 
-function assertControlStateOutsideWorkspace(config) {
-  const relative = path.relative(config.workspace, config.stateDir);
+async function resolveCanonicalPath(target) {
+  const absolute = path.resolve(target);
+  try {
+    return await realpath(absolute);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  let current = absolute;
+  const missing = [];
+  while (true) {
+    const parent = path.dirname(current);
+    if (parent === current) return absolute;
+    try {
+      return path.join(await realpath(parent), ...missing.reverse());
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      missing.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+export async function assertControlStateOutsideWorkspace(config) {
+  const workspace = await resolveCanonicalPath(config.workspace);
+  const stateDir = await resolveCanonicalPath(config.stateDir);
+  const relative = path.relative(workspace, stateDir);
   if (!relative || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
     throw new ConfigError(
       "Workflow control state must live outside the executor workspace; set stateDir to an external absolute path"
     );
   }
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const error = new RunCancelledError("Workflow run cancelled");
+  error.details = { cancelled: true };
+  throw error;
+}
+
+function isCancellation(error, signal) {
+  return Boolean(signal?.aborted)
+    || error?.details?.cancelled === true
+    || error?.name === "AbortError"
+    || error instanceof RunCancelledError;
 }
 
 function changedSnapshotPaths(before, after) {

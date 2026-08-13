@@ -16,7 +16,15 @@ Agent Office v2 是控制面，Herdr 是持久运行时：
 agent-office init .
 ```
 
-新配置会把控制状态放在工作区之外。v2 会拒绝把 `stateDir` 放进执行代理可写的项目目录，避免代理篡改任务、attempt token 或审批记录。
+`init` 为了兼容串行任务，仍会把 `stateDir` 写成项目内的 `.agent-office`。创建 v2 工作流前必须把它改成**工作区之外的绝对路径**，例如：
+
+```json
+{
+  "stateDir": "/Users/you/.local/state/agent-office/my-project"
+}
+```
+
+v2 会拒绝把 `stateDir` 放进执行代理可写的项目目录（会解析 symlink），避免代理篡改任务、attempt token 或审批记录。按默认 `init` 配置直接 `workflow create` 会被拒绝。
 
 Herdr 推荐使用专用命名 session：
 

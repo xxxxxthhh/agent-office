@@ -264,31 +264,60 @@ export class WorkspaceManager {
     if (!changedFiles.length) {
       throw new ConfigError(`Prepared integration commit contains no project changes`);
     }
-    const branchResult = await runProcess({
+    const sourceBranchResult = await runProcess({
       command: "git",
       args: ["branch", "--show-current"],
       cwd: sourceWorkspace,
       timeoutMs: 30_000
     });
-    const branch = branchResult.stdout.trim();
-    if (!branch) throw new ConfigError("Integration source is not on a named branch");
+    const sourceBranch = sourceBranchResult.stdout.trim();
+    if (!sourceBranch) throw new ConfigError("Integration source is not on a named branch");
+    const targetBranchResult = await runProcess({
+      command: "git",
+      args: ["branch", "--show-current"],
+      cwd: this.config.workspace,
+      timeoutMs: 30_000
+    });
+    const targetBranch = targetBranchResult.stdout.trim();
+    if (!targetBranch) throw new ConfigError("Integration target is not on a named branch");
+    const targetWorkspace = await realpath(this.config.workspace);
+    const targetGitCommonDir = await gitCommonDir(this.config.workspace);
     return {
       taskId: task.id,
       nodeId: node.id,
       sourceId: sourceNode.id,
       sourceWorkspace,
-      targetWorkspace: this.config.workspace,
+      sourceBranch,
+      targetWorkspace,
+      targetBranch,
+      targetGitCommonDir,
       baseHead,
       sourceHead,
-      branch,
+      branch: targetBranch,
       changedFiles,
       preparedAt: new Date().toISOString()
     };
   }
 
   async publishIntegration(intent) {
-    if (!intent || intent.targetWorkspace !== this.config.workspace) {
+    const targetWorkspace = await realpath(this.config.workspace);
+    if (!intent || intent.targetWorkspace !== targetWorkspace) {
       throw new ConfigError("Integration publication intent does not match the configured workspace");
+    }
+    const targetGitCommonDir = await gitCommonDir(this.config.workspace);
+    if (intent.targetGitCommonDir !== targetGitCommonDir) {
+      throw new ConfigError("Integration target repository identity changed after publication intent was recorded");
+    }
+    const targetBranch = (await runProcess({
+      command: "git",
+      args: ["branch", "--show-current"],
+      cwd: this.config.workspace,
+      timeoutMs: 30_000
+    })).stdout.trim();
+    if (!intent.targetBranch || targetBranch !== intent.targetBranch) {
+      throw new ConfigError(
+        `Integration target branch is ${targetBranch || "(detached)"}; expected ${intent.targetBranch}`
+      );
     }
     const sourceHead = (await runProcess({
       command: "git",
@@ -394,6 +423,18 @@ function parsePorcelain(value) {
 
 function normalizePath(value) {
   return value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/$/, "");
+}
+
+async function gitCommonDir(workspace) {
+  const result = await runProcess({
+    command: "git",
+    args: ["rev-parse", "--git-common-dir"],
+    cwd: workspace,
+    timeoutMs: 30_000
+  });
+  const raw = result.stdout.trim();
+  const absolute = path.isAbsolute(raw) ? raw : path.resolve(workspace, raw);
+  return realpath(absolute);
 }
 
 async function listGitChanges(workspace) {
