@@ -1,10 +1,14 @@
 # Agent Office
 
-Agent Office 是一个本地优先的多代理编排层。它让 Codex、Claude Code 或任意支持 stdin/stdout 的模型工具，围绕同一任务共享目标、工作区、消息和交接状态，像同事一样轮流实现、审查、返工并完成任务。
+Agent Office 是一个本地优先的多工具工作流控制面。它让 Codex、Claude Code、Shell 和 Herdr 围绕同一任务共享目标、DAG、消息、审批和交接状态，像同事一样并行分析、隔离实现、审查、返工并完成任务。
 
-当前版本包含可运行的编排 MVP 和本地实时控制台，不需要安装第三方运行时依赖。
+0.4 版同时保留原有串行轮次，并加入 Herdr 持久运行时、ready-set 并行、join barrier、worktree 写入隔离、结构化 attempt result、人工 gate 和 `ff-only` 发布。核心仍只依赖 Node.js 内置模块；Herdr 是可选运行时。
+
+这里的 “v2” 指 `mode: "workflow"` 的任务快照；配置文件和 workflow definition 当前仍使用 `version: 1`。
 
 第一次使用请从 [Agent Office 开始工作手册](docs/getting-started.zh-CN.md) 开始。
+
+跨工具并行工作流请直接看 [Agent Office v2：Herdr 工作流手册](docs/workflows.zh-CN.md)。
 
 如果希望直接使用全局命令：
 
@@ -17,6 +21,11 @@ agent-office --help
 ## 已实现
 
 - 共享任务：目标、参与者、状态、轮次和产物统一持久化。
+- DAG 调度：并行执行 ready-set，依赖自然形成 fan-out、fan-in 与 join barrier。
+- Herdr Runtime：可选地接管 workflow agent 节点，使用专用命名 session 保留交互式进程，并校验 workspace、pane 和 agent session 身份。
+- 安全写入：唯一 writer 使用隔离 worktree，完整快照校验 write scopes、ignored 文件、Git 元数据和外部符号链接。
+- 发布门：含写入的工作流强制要求 writer 之后的人工 approval 与 Agent Office 独占的 `ff-only` integration；示例把独立 review/QA 明确放在 approval 之前。
+- 可恢复执行：任务租约 heartbeat、attempt token、Herdr result drop、迟到结果拒绝，以及 retry/rework 后的下游重开。
 - 同事邮箱：支持发给团队、指定代理或用户的结构化消息。
 - 返工闭环：已完成的代理收到同事的直接消息后自动重新进入工作状态。
 - 四类适配器：Codex CLI、Claude Code CLI、通用命令和离线 mock。
@@ -67,6 +76,7 @@ agent-office serve
 - 桌面和移动端响应式布局。
 
 控制台默认只绑定 `127.0.0.1`，服务端拒绝跨站写请求，也不提供远程绑定选项。
+工作流视图可显示节点状态、批准 gate、重试失败/阻塞节点，以及显式重开成功的 agent/command 节点做返工；即使 attempt 配额已耗尽，符合条件的人工返工操作仍会显示。
 
 零成本体验控制台：
 
@@ -76,7 +86,38 @@ agent-office serve --config ./examples/team.dashboard-demo.json
 
 然后在页面里新建任务并点击“启动协作”，可以看到 mock builder/reviewer 的完整返工闭环。
 
+## 本地控制 API 与手机访问
+
+Dashboard 使用同一个 TaskStore 和调度器。当前固定接口包括：
+
+```text
+GET  /api/health
+GET  /api/capabilities
+GET  /api/tasks
+GET  /api/tasks/<task-id>
+GET  /api/events?limit=<n>
+GET  /api/stream
+POST /api/capabilities/refresh
+POST /api/tasks
+POST /api/tasks/<task-id>/messages
+POST /api/tasks/<task-id>/run
+POST /api/tasks/<task-id>/nodes/<node-id>/approve
+POST /api/tasks/<task-id>/nodes/<node-id>/retry
+```
+
+`POST /api/tasks` 创建兼容的串行任务；当前没有通过 HTTP 上传 workflow definition 的接口，v2 仍使用 `agent-office workflow create --file ...`。控制 API 不提供任意命令编辑入口。
+
+服务只接受 loopback Host，并拒绝带有不同 Origin 的跨站写请求。手机应通过 SSH 或 Tailscale SSH 在手机端建立本地端口转发，不要把服务绑定到 `0.0.0.0`：
+
+```bash
+ssh -N -L 4177:127.0.0.1:4177 user@your-mac
+```
+
+然后在建立转发的设备打开 `http://127.0.0.1:4177`。更多操作与安全边界见 [v2 工作流手册](docs/workflows.zh-CN.md)。
+
 ## 在真实项目里运行 Codex + Claude Code
+
+下面是兼容保留的串行轮次模式。若要跨工具并行、Herdr 持久 session 和 worktree 发布门，请使用 [v2 工作流](docs/workflows.zh-CN.md)。
 
 先进入希望两位代理共同工作的代码库，然后初始化：
 
@@ -119,7 +160,7 @@ cd /path/to/your-project
 
 - Codex 使用 `workspace-write` 沙箱。
 - Claude Code 使用 `acceptEdits` 权限模式。
-- 两者按轮次串行执行，避免同时写同一文件。
+- 串行模式仍按轮次执行。v2 允许只读任务并行，但写入只发生在唯一隔离 worktree。
 
 ## 配置
 
@@ -129,7 +170,7 @@ cd /path/to/your-project
 {
   "version": 1,
   "workspace": ".",
-  "stateDir": ".agent-office",
+  "stateDir": "/Users/you/.local/state/agent-office/project-hash",
   "collaboration": {
     "maxRounds": 4,
     "transcriptMessages": 40,
@@ -140,6 +181,17 @@ cd /path/to/your-project
     "maxAgents": 2,
     "probeTimeoutMs": 10000,
     "cacheTtlMs": 300000
+  },
+  "execution": {
+    "runtime": "process",
+    "maxConcurrency": 4,
+    "leaseTimeoutMs": 60000,
+    "snapshotMaxFiles": 50000,
+    "herdrCommand": "herdr",
+    "herdrSession": "agent-office",
+    "herdrServerMode": "external",
+    "herdrPathPrefixes": [],
+    "keepAgents": true
   },
   "agents": [
     {
@@ -159,6 +211,10 @@ cd /path/to/your-project
   ]
 }
 ```
+
+`agent-office init` 会为当前项目生成带哈希的外部 `stateDir`，默认位于 `~/.local/state/agent-office/`。v2 在创建工作流时会拒绝位于 executor workspace 内的控制状态；旧串行任务仍兼容显式配置的 `.agent-office`。
+
+`execution.runtime` 默认为 `process`，也可以由单个 workflow 的 `runtime` 覆盖。`runtime: "herdr"` 只影响 `agent` 节点；`command` 和 `integration` 始终由本地 Process Runtime 执行。`herdrServerMode: "external"` 只连接专用 session，不替用户启动或停止它；`managed` 会启动并记录独立 server。`herdrPathPrefixes` 只会把绝对目录前置到 Agent Office 启动的 managed server 进程所继承的 `PATH`。后续 login shell 或 agent launcher 仍可能重排 `PATH`；部署后应在实际 agent 执行上下文中分别运行 `command -v codex` 和 `command -v codex-code-mode-host`（或对应的相邻 helper），核验它们来自预期安装。0.4 会保留 Herdr agent、server 和 worktree，便于审计与恢复，不做自动清理。
 
 `routing.enabled` 默认开启。Agent Office 不会为了“探测模型”发起付费模型请求：
 
@@ -216,7 +272,7 @@ cd /path/to/your-project
 
 支持的参数占位符：
 
-- `{{workspace}}`：共享工作区绝对路径。
+- `{{workspace}}`：当前解析后的工作区绝对路径；串行任务是共享工作区，v2 可能是隔离 worktree。
 - `{{agentId}}`：当前代理 ID。
 - `{{schema}}`：Turn Protocol JSON Schema 路径。
 
@@ -231,32 +287,40 @@ agent-office capabilities [--refresh] [--objective "..."] [--json] [--config pat
 agent-office task create --objective "..." [--config path]
 agent-office task list [--config path]
 agent-office task show <task-id> [--json] [--config path]
+agent-office workflow create --objective "..." --file workflow.json [--config path]
+agent-office workflow approve <task-id> <node-id> [--config path]
+agent-office workflow retry <task-id> <node-id> [--config path]
 agent-office message send <task-id> --body "..." [--to agent|team] [--config path]
 agent-office run <task-id> [--rounds N] [--config path]
 agent-office serve [--host 127.0.0.1] [--port 4177] [--config path]
 agent-office demo
 ```
 
+`workflow retry` 不会立即执行节点，只把它恢复为可调度状态，之后仍需再次 `run`。对 `failed` 或尚未发布的 `succeeded` agent/command 节点，每次显式 retry 都会授权一次新的人工 attempt，即使历史 `attempts` 已达到或超过 `maxAttempts`；原 attempt 计数不会回退。`maxAttempts` 仍只约束 `status: "working"` 触发的自动续跑，因此超额的人工 attempt 若仍返回 `working`，会再次失败并等待下一次显式 retry。成功节点 rework 会重置 review、QA、approval 和 integration 等全部下游。只有明确返回 `blocked` 的 attempt 在 retry 时退还一次配额。`approval`、成功的 integration、已经成功发布后的上游节点，以及存在活动节点或有效租约时仍拒绝 retry；失败的 integration 可在修复目标分支关系后 retry，并复用已持久化的精确发布意图。
+
 ## 状态与审计
 
-目标工作区下的 `.agent-office/` 包含：
+配置的 `stateDir` 包含：
 
 ```text
-.agent-office/
-├── events.jsonl        # append-only 事件记录
-├── runs/               # 每次模型/命令调用的原始输出
-└── tasks/
-    └── task-....json   # 可恢复任务快照
+<stateDir>/
+├── .write-lock/                  # 仅持锁时存在
+├── events.jsonl                  # append-only 事件记录
+├── runs/                         # 模型、命令和 Herdr trace
+├── tasks/task-....json           # 原子写入的可恢复任务快照
+├── herdr-server.log              # managed Herdr 模式按需产生
+└── herdr-server-owner.json       # managed Herdr owner 记录
 ```
 
-项目默认将该目录加入 `.gitignore`。如果任务状态需要跨机器共享，应由上层系统明确选择加密存储或可信数据库，不建议直接提交模型原始输出。
+Herdr attempt result drop 位于操作系统临时目录的 `<task-id>/<node-id>/<attemptToken>.json`，不在 `stateDir`；只有 token 匹配的当前 attempt 才会进入任务快照。如果任务状态需要跨机器共享，应由上层系统明确选择加密存储或可信数据库，不建议直接提交模型原始输出。
 
 ## 设计边界
 
-MVP 有意采用确定性的串行轮次，而不是让多个编码代理同时修改相同目录。它已经解决“共同目标、同事消息、交接、返工、恢复和审计”，暂未包含：
+串行任务仍使用确定性轮次；v2 工作流允许只读并行，并把唯一 writer 隔离到 worktree。当前明确不包含：
 
 - 跨机器调度或中心服务；
-- 并行 worktree 隔离与自动合并；
+- 多个写 worktree 的自动合并、rebase 或冲突解决；
+- 自动清理 worktree、Herdr agent 或 managed server；
 - 预算、速率限制和组织级审批策略；
 - 对 Claude 账号模型权限做无费用的强验证（CLI 当前没有稳定的模型目录枚举命令，系统会区分 `advertised` 与 `configured`）；
 - 长期知识库或向量检索。

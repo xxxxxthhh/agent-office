@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "runtime": "herdr",
+  "maxConcurrency": 2,
+  "nodes": [
+    {
+      "id": "claude-plan",
+      "type": "agent",
+      "owner": "claude",
+      "access": "read_only",
+      "prompt": "Read the objective and repository. Produce a compact implementation plan, acceptance criteria, and likely edge cases. Do not edit files."
+    },
+    {
+      "id": "codex-risk",
+      "type": "agent",
+      "owner": "codex",
+      "access": "read_only",
+      "prompt": "Independently inspect the repository and identify the smallest safe implementation, regression risks, and the tests required. Do not edit files."
+    },
+    {
+      "id": "build",
+      "type": "agent",
+      "owner": "claude",
+      "dependsOn": [
+        "claude-plan",
+        "codex-risk"
+      ],
+      "access": "write",
+      "workspace": "worktree",
+      "maxAttempts": 2,
+      "writeScopes": [
+        "src/**",
+        "tests/**",
+        "package.json",
+        "README.md"
+      ],
+      "prompt": "Implement the objective in the isolated worktree. Incorporate both planning handoffs, add tests, and do not commit."
+    },
+    {
+      "id": "codex-review",
+      "type": "agent",
+      "owner": "codex",
+      "dependsOn": [
+        "build"
+      ],
+      "access": "read_only",
+      "workspaceFrom": "build",
+      "prompt": "Review the built result against the objective and tests. Do not edit files. Report done only if no blocking finding remains."
+    },
+    {
+      "id": "shell-qa",
+      "type": "command",
+      "dependsOn": [
+        "build"
+      ],
+      "access": "read_only",
+      "workspaceFrom": "build",
+      "command": "npm",
+      "args": [
+        "test"
+      ]
+    },
+    {
+      "id": "release-gate",
+      "type": "approval",
+      "dependsOn": [
+        "build",
+        "codex-review",
+        "shell-qa"
+      ],
+      "prompt": "Review the implementation, independent review, and QA evidence before publishing the isolated branch."
+    },
+    {
+      "id": "publish",
+      "type": "integration",
+      "source": "build",
+      "dependsOn": [
+        "build",
+        "release-gate"
+      ]
+    },
+    {
+      "id": "main-qa",
+      "type": "command",
+      "dependsOn": [
+        "publish"
+      ],
+      "access": "read_only",
+      "command": "npm",
+      "args": [
+        "test"
+      ]
+    }
+  ]
+}

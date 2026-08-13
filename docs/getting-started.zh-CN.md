@@ -4,6 +4,8 @@
 
 ## 1. 先理解它如何工作
 
+本手册主要介绍兼容保留的串行轮次模式。要使用 Herdr 持久 session、DAG 并行、worktree、审批和发布门，请看 [Agent Office v2：Herdr 工作流手册](workflows.zh-CN.md)。
+
 Agent Office 是 Codex CLI、Claude Code CLI 与其他工具之间的本地编排层：
 
 ```text
@@ -299,7 +301,7 @@ node "$AGENT_OFFICE_CLI" task list
 node "$AGENT_OFFICE_CLI" task show "$AGENT_OFFICE_TASK_ID" --json
 ```
 
-CLI 与看板使用同一个 `.agent-office` 状态目录。你可以在终端创建任务，再到看板查看和继续，也可以反过来操作。
+CLI 与看板使用配置中的同一个 `stateDir`。新配置默认把它放在项目之外；你可以在终端创建任务，再到看板查看和继续，也可以反过来操作。
 
 ## 11. 如何在任务中间进行干预
 
