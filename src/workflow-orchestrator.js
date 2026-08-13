@@ -7,7 +7,7 @@ import { createAdapters } from "./adapters/index.js";
 import { normalizeWorkflowDefinition } from "./workflow-definition.js";
 import { WorkspaceManager } from "./workspaces.js";
 import { HerdrExecutionRuntime, ProcessExecutionRuntime } from "./execution-runtimes.js";
-import { nowIso, sleep, truncate } from "./utils.js";
+import { isRelativeOutside, nowIso, sleep, truncate } from "./utils.js";
 
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed"]);
 const ACTIVE_NODE_STATUSES = new Set(["dispatched", "working"]);
@@ -91,7 +91,7 @@ export class WorkflowOrchestrator {
         onEvent({ type: "workflow.node_dispatched", taskId, nodeId: node.id, attempt: node.attempts });
       }
       if (claimed.length) {
-        await Promise.all(claimed.map((node) => this.#executeNode(taskId, node.id, leaseId, onEvent, signal)));
+        await this.#runClaimedNodes(claimed, taskId, leaseId, onEvent, signal);
         continue;
       }
 
@@ -165,6 +165,16 @@ export class WorkflowOrchestrator {
       refreshParticipants(task);
       return claimed.map((node) => structuredClone(node));
     }, {});
+  }
+
+  async #runClaimedNodes(claimed, taskId, leaseId, onEvent, signal) {
+    const results = await Promise.allSettled(
+      claimed.map((node) => this.#executeNode(taskId, node.id, leaseId, onEvent, signal))
+    );
+    const rejected = results.filter((result) => result.status === "rejected");
+    const cancellation = rejected.find((result) => isCancellation(result.reason, signal));
+    if (cancellation) throw cancellation.reason;
+    if (rejected[0]) throw rejected[0].reason;
   }
 
   async #executeNode(taskId, nodeId, leaseId, onEvent, signal = null) {
@@ -302,11 +312,13 @@ export class WorkflowOrchestrator {
         changedFiles
       });
     } catch (error) {
+      const canInterrupt = runtime && handle && typeof runtime.interrupt === "function";
       if (isCancellation(error, signal)) {
+        if (canInterrupt) await runtime.interrupt(handle).catch(() => {});
         await this.#reopenCancelledNode(taskId, nodeId, attemptToken, leaseId);
         throw error;
       }
-      const containment = runtime && handle && typeof runtime.interrupt === "function"
+      const containment = canInterrupt
         ? await runtime.interrupt(handle).catch(() => ({ settled: false }))
         : { settled: true };
       const failure = await this.#inspectFailedWorkspace(
@@ -739,7 +751,7 @@ export async function assertControlStateOutsideWorkspace(config) {
   const workspace = await resolveCanonicalPath(config.workspace);
   const stateDir = await resolveCanonicalPath(config.stateDir);
   const relative = path.relative(workspace, stateDir);
-  if (!relative || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+  if (!isRelativeOutside(relative)) {
     throw new ConfigError(
       "Workflow control state must live outside the executor workspace; set stateDir to an external absolute path"
     );

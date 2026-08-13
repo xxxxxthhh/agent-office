@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, readlink, realpath } from "node:fs/promises";
 import { ConfigError } from "./errors.js";
 import { runProcess } from "./adapters/process.js";
+import { isWorkspaceLockName } from "./store.js";
+import { isRelativeOutside } from "./utils.js";
 
 export class WorkspaceManager {
   constructor({ config, createHerdrWorktree = null }) {
@@ -67,7 +69,7 @@ export class WorkspaceManager {
       const entries = await readdir(directory, { withFileTypes: true });
       for (const entry of entries) {
         const relativePath = normalizePath(path.join(relativeDirectory, entry.name));
-        if (!relativeDirectory && entry.name === ".git") continue;
+        if (!relativeDirectory && (entry.name === ".git" || isWorkspaceLockName(entry.name))) continue;
         if (this.#isControlState(workspace, relativePath)) continue;
         const absolutePath = path.join(directory, entry.name);
         if (entry.isDirectory()) {
@@ -85,7 +87,7 @@ export class WorkspaceManager {
           const resolved = await realpath(absolutePath).catch(() => null);
           if (resolved) {
             const outside = path.relative(root, resolved);
-            if (outside.startsWith("..") || path.isAbsolute(outside)) {
+            if (isRelativeOutside(outside)) {
               throw new ConfigError(`External symbolic links are not allowed in workflow workspaces: ${relativePath}`);
             }
           }
@@ -112,7 +114,7 @@ export class WorkspaceManager {
   #isControlState(workspace, filePath) {
     if (!this.config.stateDir) return false;
     const relative = path.relative(workspace, this.config.stateDir);
-    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
+    if (!relative || isRelativeOutside(relative)) return false;
     const normalized = normalizePath(relative);
     return filePath === normalized || filePath.startsWith(`${normalized}/`);
   }
@@ -149,7 +151,7 @@ export class WorkspaceManager {
       }
       const absolute = path.resolve(workspace, normalized);
       const relative = path.relative(workspace, absolute);
-      if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      if (isRelativeOutside(relative)) {
         throw new ConfigError(`Artifact path escapes the node workspace: ${artifact}`);
       }
       if (!await lstat(absolute).catch(() => null)) {
@@ -199,7 +201,7 @@ export class WorkspaceManager {
       );
     }
     const dirtyFiles = (await listGitChanges(sourceWorkspace))
-      .filter((filePath) => !this.#isControlState(sourceWorkspace, filePath));
+      .filter((filePath) => !isWorkspaceLockName(filePath) && !this.#isControlState(sourceWorkspace, filePath));
     const expectedMessage = `agent-office: ${task.id} ${sourceNode.id}`;
 
     if (sourceHead === baseHead) {
@@ -329,7 +331,7 @@ export class WorkspaceManager {
       throw new ConfigError("Prepared integration source head changed after publication intent was recorded");
     }
     const targetChanges = (await listGitChanges(this.config.workspace))
-      .filter((filePath) => !this.#isControlState(this.config.workspace, filePath));
+      .filter((filePath) => !isWorkspaceLockName(filePath) && !this.#isControlState(this.config.workspace, filePath));
     if (targetChanges.length) {
       throw new ConfigError(
         `Integration target must be clean before ff-only publication: ${targetChanges.join(", ")}`
@@ -374,7 +376,7 @@ export class WorkspaceManager {
       throw new ConfigError("ff-only integration did not publish the prepared source head");
     }
     const afterChanges = (await listGitChanges(this.config.workspace))
-      .filter((filePath) => !this.#isControlState(this.config.workspace, filePath));
+      .filter((filePath) => !isWorkspaceLockName(filePath) && !this.#isControlState(this.config.workspace, filePath));
     if (afterChanges.length) {
       throw new ConfigError(
         `Integration target is not clean after publication: ${afterChanges.join(", ")}`

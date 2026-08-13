@@ -67,6 +67,31 @@ test("detects edits to an already dirty file and supports bounded glob syntax", 
   assert.equal(matchesAnyScope("test/a.js", ["src/**"]), false);
 });
 
+test("does not treat the live workspace lock as a project edit or dirty publish target", async (context) => {
+  const fixture = await integrationFixture(context, "agent-office-lock-ignore-");
+  const { manager, repository, task, node, worktree } = fixture;
+  const { WORKSPACE_LOCK_NAME } = await import("../src/store.js");
+  const lockPath = path.join(repository, WORKSPACE_LOCK_NAME);
+  const takeoverPath = `${lockPath}.takeover`;
+  await writeFile(lockPath, JSON.stringify({ runId: "outer" }));
+  await mkdir(takeoverPath);
+  const before = await manager.snapshot(repository);
+  await writeFile(lockPath, JSON.stringify({ runId: "heartbeat" }));
+  const after = await manager.snapshot(repository);
+  assert.equal(before[".agent-office.lock"], undefined);
+  assert.deepEqual(
+    Object.keys(after).filter((key) => !key.startsWith("@git/")),
+    Object.keys(before).filter((key) => !key.startsWith("@git/"))
+  );
+
+  node.baselineChanges = await manager.snapshot(worktree);
+  node.workspacePath = worktree;
+  await writeFile(path.join(worktree, "src", "answer.js"), "export const answer = 42;\n");
+  node.verifiedSnapshot = await manager.snapshot(worktree);
+  const publication = await manager.integrate(task, task.workflow.nodes.publish);
+  assert.deepEqual(publication.changedFiles, ["src/answer.js"]);
+});
+
 test("does not treat Agent Office control-state writes as project edits", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-office-control-state-"));
   context.after(() => rm(root, { recursive: true, force: true }));

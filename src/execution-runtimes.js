@@ -209,7 +209,7 @@ export class HerdrExecutionRuntime {
     }
   }
 
-  async dispatch({ binding, prompt, timeoutMs, attemptToken }) {
+  async dispatch({ binding, prompt, timeoutMs, attemptToken, signal = null }) {
     if (!binding?.agentName) throw new ConfigError("Herdr dispatch requires an agent binding");
     const current = await this.inspect(binding);
     if (current.binding) Object.assign(binding, current.binding);
@@ -226,7 +226,8 @@ export class HerdrExecutionRuntime {
     const settledPromise = this.#promptWithMissingTargetRecovery(
       binding,
       promptArgs,
-      timeoutMs + 5_000
+      timeoutMs + 5_000,
+      signal
     );
     return {
       id: attemptToken,
@@ -234,6 +235,7 @@ export class HerdrExecutionRuntime {
       agentName: binding.agentName,
       binding,
       timeoutMs,
+      signal,
       settledPromise
     };
   }
@@ -301,9 +303,9 @@ export class HerdrExecutionRuntime {
     return payload.result?.agents ?? [];
   }
 
-  async #promptWithMissingTargetRecovery(binding, promptArgs, timeoutMs) {
+  async #promptWithMissingTargetRecovery(binding, promptArgs, timeoutMs, signal = null) {
     try {
-      return await this.#call(promptArgs, timeoutMs);
+      return await this.#call(promptArgs, timeoutMs, signal);
     } catch (error) {
       if (!isMissingAgentTarget(error)) throw error;
       const refreshed = await this.#awaitStableAgent(
@@ -313,7 +315,7 @@ export class HerdrExecutionRuntime {
         binding.workspace
       );
       Object.assign(binding, refreshed);
-      return this.#call(promptArgs, timeoutMs);
+      return this.#call(promptArgs, timeoutMs, signal);
     }
   }
 
@@ -417,14 +419,15 @@ export class HerdrExecutionRuntime {
     }
   }
 
-  async #call(args, timeoutMs = 30_000) {
+  async #call(args, timeoutMs = 30_000, signal = null) {
     let result;
     try {
       result = await runProcess({
         command: this.config.execution.herdrCommand,
         args: ["--session", this.config.execution.herdrSession, ...args],
         cwd: this.config.workspace,
-        timeoutMs
+        timeoutMs,
+        signal
       });
     } catch (error) {
       const payload = parseJson(error.details?.stdout) ?? parseJson(error.details?.stderr);

@@ -9,6 +9,7 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { runProcess } from "../src/adapters/process.js";
+import { exists, sleep } from "../src/utils.js";
 import { normalizeConfig } from "../src/config.js";
 import { RunLeaseError } from "../src/errors.js";
 import { Orchestrator } from "../src/orchestrator.js";
@@ -298,14 +299,21 @@ test("a SIGTERM-ignoring grandchild is dead by the time cancellation settles", a
   `);
 
   const controller = new AbortController();
-  setTimeout(() => controller.abort(), 150);
-  await assert.rejects(() => runProcess({
+  const running = runProcess({
     command: process.execPath,
     args: [agent],
     cwd: workspace,
     signal: controller.signal,
     timeoutMs: 15_000
-  }));
+  });
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (await exists(pidFile)) break;
+    await sleep(10);
+  }
+  if (!await exists(pidFile)) throw new Error("grandchild did not write a pid file before cancellation");
+  controller.abort();
+  await assert.rejects(() => running);
 
   // The moment of settling is the moment a lease would be released.
   const grandchildPid = Number(await readFile(pidFile, "utf8"));

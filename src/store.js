@@ -21,6 +21,10 @@ import { assertNonEmptyString, nowIso, sleep } from "./utils.js";
 // the same lock, whatever stateDir each of them uses.
 export const WORKSPACE_LOCK_NAME = ".agent-office.lock";
 
+export function isWorkspaceLockName(name) {
+  return name === WORKSPACE_LOCK_NAME || name.startsWith(`${WORKSPACE_LOCK_NAME}.`);
+}
+
 export class TaskStore {
   constructor(stateDir, options = {}) {
     this.stateDir = path.resolve(stateDir);

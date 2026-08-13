@@ -17,6 +17,14 @@ export function resolveFrom(baseDir, value) {
   return path.isAbsolute(value) ? path.normalize(value) : path.resolve(baseDir, value);
 }
 
+// path.relative() of a child named "..state" is "..state", which is still
+// inside the base. Only ".." and a ".."+separator prefix leave the base.
+export function isRelativeOutside(relative) {
+  if (!relative) return false;
+  if (path.isAbsolute(relative)) return true;
+  return relative === ".." || relative.startsWith(`..${path.sep}`);
+}
+
 export async function exists(targetPath) {
   try {
     await access(targetPath, constants.F_OK);

@@ -21,6 +21,8 @@ test("runs the ready set in parallel and holds a join until every dependency suc
   const fixture = await createFixture(context);
   let active = 0;
   let maxActive = 0;
+  let bothStarted;
+  const bothStartedPromise = new Promise((resolve) => { bothStarted = resolve; });
   const events = [];
   const fakeRuntime = {
     ensureAgent: async () => null,
@@ -28,10 +30,12 @@ test("runs the ready set in parallel and holds a join until every dependency suc
       active += 1;
       maxActive = Math.max(maxActive, active);
       events.push(`start:${entry.node.id}`);
+      if (active === 2) bothStarted();
       return entry;
     },
     wait: async (handle) => {
-      await new Promise((resolve) => setTimeout(resolve, handle.node.id === "join" ? 5 : 40));
+      if (handle.node.id !== "join") await bothStartedPromise;
+      await new Promise((resolve) => setTimeout(resolve, handle.node.id === "join" ? 5 : 10));
       active -= 1;
       events.push(`end:${handle.node.id}`);
       return {
@@ -949,6 +953,110 @@ test("refuses workflow state stored inside an executor workspace", async (contex
     }),
     /control state must live outside/
   );
+});
+
+test("rejects a workspace-child stateDir named ..state", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-dotdot-state-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const config = normalizeConfig({
+    version: 1,
+    workspace,
+    stateDir: path.join(workspace, "..state"),
+    agents: [{ id: "alpha", adapter: "mock", role: "Work." }]
+  }, workspace);
+  const store = new TaskStore(config.stateDir);
+  const schema = await loadTurnSchema(SCHEMA_PATH);
+  const orchestrator = new WorkflowOrchestrator({ config, store, schema, schemaPath: SCHEMA_PATH });
+  await assert.rejects(
+    () => orchestrator.createWorkflow("Dot-dot prefix is still inside the workspace.", {
+      version: 1,
+      nodes: [{ id: "one", owner: "alpha" }]
+    }),
+    /control state must live outside/
+  );
+});
+
+test("cancellation interrupts a hanging Herdr wait instead of waiting for timeout", async (context) => {
+  const fixture = await createFixture(context);
+  let interruptCalls = 0;
+  let waitStarted;
+  const waitStartedPromise = new Promise((resolve) => { waitStarted = resolve; });
+  const herdr = {
+    ensureAgent: async () => ({ agentName: "ao-test", kind: "codex", workspace: fixture.config.workspace }),
+    dispatch: async (entry) => entry,
+    wait: async (handle) => {
+      waitStarted();
+      await new Promise((_, reject) => {
+        const fail = () => reject(Object.assign(new Error("cancelled"), { details: { cancelled: true } }));
+        if (handle.signal?.aborted) return fail();
+        handle.signal?.addEventListener("abort", fail, { once: true });
+      });
+    },
+    interrupt: async () => {
+      interruptCalls += 1;
+      return { interrupted: true, settled: true };
+    },
+    release: async () => {}
+  };
+  const orchestrator = fixture.orchestrator({ herdr });
+  const task = await orchestrator.createWorkflow("Cancel a Herdr agent.", {
+    version: 1,
+    runtime: "herdr",
+    nodes: [{ id: "inspect", owner: "alpha" }]
+  });
+  const controller = new AbortController();
+  const running = orchestrator.runWorkflow(task.id, { signal: controller.signal });
+  await waitStartedPromise;
+  controller.abort();
+  const finished = await running;
+  assert.equal(finished.status, "ready");
+  assert.equal(interruptCalls, 1);
+});
+
+test("parallel cancellation waits for every node to stop before returning", async (context) => {
+  const fixture = await createFixture(context);
+  const interrupts = [];
+  let releases = 0;
+  let startedCount = 0;
+  let bothStarted;
+  const bothStartedPromise = new Promise((resolve) => { bothStarted = resolve; });
+  const runtime = {
+    ensureAgent: async () => null,
+    dispatch: async (entry) => entry,
+    wait: async (handle) => {
+      startedCount += 1;
+      if (startedCount === 2) bothStarted();
+      await new Promise((_, reject) => {
+        const fail = () => reject(Object.assign(new Error("cancelled"), { details: { cancelled: true } }));
+        if (handle.signal?.aborted) return fail();
+        handle.signal?.addEventListener("abort", fail, { once: true });
+      });
+    },
+    interrupt: async (handle) => {
+      interrupts.push(handle.node.id);
+      return { interrupted: true, settled: true };
+    },
+    release: async () => {
+      releases += 1;
+    }
+  };
+  const orchestrator = fixture.orchestrator({ process: runtime });
+  const task = await orchestrator.createWorkflow("Cancel both ready nodes.", {
+    version: 1,
+    maxConcurrency: 2,
+    nodes: [
+      { id: "left", owner: "alpha" },
+      { id: "right", owner: "beta" }
+    ]
+  });
+  const controller = new AbortController();
+  const running = orchestrator.runWorkflow(task.id, { signal: controller.signal });
+  await bothStartedPromise;
+  controller.abort();
+  const finished = await running;
+  assert.equal(finished.status, "ready");
+  assert.equal(releases, 2);
+  assert.deepEqual(interrupts.sort(), ["left", "right"]);
 });
 
 test("rejects a stateDir symlink that resolves inside the executor workspace", async (context) => {

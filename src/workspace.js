@@ -4,6 +4,7 @@ import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { runProcess } from "./adapters/process.js";
 import { WORKSPACE_LOCK_NAME } from "./store.js";
+import { isRelativeOutside } from "./utils.js";
 
 const GIT_TIMEOUT_MS = 10_000;
 const MAX_TRACKED_FILES = 500;
@@ -290,7 +291,7 @@ function ignoredPrefixes(workspace, stateDir) {
   const prefixes = [];
   if (stateDir) {
     const relative = path.relative(path.resolve(workspace), path.resolve(stateDir));
-    if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+    if (relative && !isRelativeOutside(relative)) {
       prefixes.push(`${relative}/`);
     }
   }
