@@ -1013,6 +1013,68 @@ test("cancellation interrupts a hanging Herdr wait instead of waiting for timeou
   assert.equal(interruptCalls, 1);
 });
 
+test("unproven Herdr stop fails the node, taints the writer, and fences the workspace", async (context) => {
+  const fixture = await createFixture(context);
+  let interruptCalls = 0;
+  let waitStarted;
+  const waitStartedPromise = new Promise((resolve) => { waitStarted = resolve; });
+  const herdr = {
+    ensureAgent: async () => ({ agentName: "ao-test", kind: "codex", workspace: fixture.config.workspace }),
+    dispatch: async (entry) => entry,
+    wait: async (handle) => {
+      waitStarted();
+      await new Promise((_, reject) => {
+        const fail = () => reject(Object.assign(new Error("cancelled"), { details: { cancelled: true } }));
+        if (handle.signal?.aborted) return fail();
+        handle.signal?.addEventListener("abort", fail, { once: true });
+      });
+    },
+    interrupt: async () => {
+      interruptCalls += 1;
+      return { interrupted: true, settled: false };
+    },
+    release: async () => {}
+  };
+  const orchestrator = fixture.orchestrator({ herdr });
+  const task = await orchestrator.createWorkflow("Do not release an unproven Herdr stop.", {
+    version: 1,
+    runtime: "herdr",
+    nodes: [
+      {
+        id: "build",
+        owner: "alpha",
+        access: "write",
+        workspace: "worktree",
+        writeScopes: ["src/**"]
+      },
+      { id: "gate", type: "approval", dependsOn: ["build"], prompt: "Approve." },
+      { id: "publish", type: "integration", source: "build", dependsOn: ["build", "gate"] }
+    ]
+  });
+  const controller = new AbortController();
+  const running = orchestrator.runWorkflow(task.id, { signal: controller.signal });
+  await waitStartedPromise;
+  controller.abort();
+  const finished = await running;
+  assert.equal(interruptCalls, 1);
+  assert.equal(finished.status, "failed");
+  assert.equal(finished.workflow.nodes.build.status, "failed");
+  assert.match(finished.workflow.nodes.build.error, /could not be proven stopped/);
+  assert.equal(finished.workflow.workspaceTaints.build.nodeId, "build");
+  const fence = await fixture.store.readWorkspaceFence(fixture.config.workspace);
+  assert.equal(fence.kind, "containment");
+  assert.equal(fence.nodeId, "build");
+  const other = await fixture.store.createTask("Must not enter a fenced workspace.", [
+    { id: "alpha", adapter: "mock", role: "Alpha." }
+  ]);
+  await assert.rejects(
+    () => fixture.store.acquireRunLease(other.id, "after-unproven-stop", {
+      workspace: fixture.config.workspace
+    }),
+    /fenced after an unproven stop/
+  );
+});
+
 test("parallel cancellation waits for every node to stop before returning", async (context) => {
   const fixture = await createFixture(context);
   const interrupts = [];

@@ -20,9 +20,11 @@ import { assertNonEmptyString, nowIso, sleep } from "./utils.js";
 // Lives at the workspace root so every config pointing at this workspace sees
 // the same lock, whatever stateDir each of them uses.
 export const WORKSPACE_LOCK_NAME = ".agent-office.lock";
+export const WORKSPACE_FENCE_NAME = ".agent-office.fence";
 
 export function isWorkspaceLockName(name) {
-  return name === WORKSPACE_LOCK_NAME || name.startsWith(`${WORKSPACE_LOCK_NAME}.`);
+  return name === WORKSPACE_LOCK_NAME || name.startsWith(`${WORKSPACE_LOCK_NAME}.`)
+    || name === WORKSPACE_FENCE_NAME || name.startsWith(`${WORKSPACE_FENCE_NAME}.`);
 }
 
 export class TaskStore {
@@ -456,6 +458,18 @@ export class TaskStore {
     const canonicalWorkspace = workspace
       ? await realpath(workspace).catch(() => path.resolve(workspace))
       : null;
+    if (canonicalWorkspace) {
+      const fence = await this.readWorkspaceFence(canonicalWorkspace);
+      if (fence) {
+        throw new RunLeaseError(
+          `Workspace ${canonicalWorkspace} is fenced after an unproven stop`
+          + (fence.taskId ? ` of ${fence.taskId}` : "")
+          + (fence.nodeId ? `/${fence.nodeId}` : "")
+          + `. Confirm the agent is stopped, then delete ${path.join(canonicalWorkspace, WORKSPACE_FENCE_NAME)}.`,
+          fence
+        );
+      }
+    }
 
     const taskLease = await this.#withLock(async () => {
       const existing = await this.#assessLease(this.#leasePath(taskId));
@@ -632,6 +646,30 @@ export class TaskStore {
     throw new RunLeaseError(
       `Could not acquire the workspace lock at ${lockPath} within ${this.lockTimeoutMs} ms.`
     );
+  }
+
+  async pinWorkspaceFence(workspace, record = {}) {
+    const canonicalWorkspace = await realpath(workspace).catch(() => path.resolve(workspace));
+    const fence = {
+      kind: "containment",
+      workspace: canonicalWorkspace,
+      taskId: record.taskId ?? null,
+      nodeId: record.nodeId ?? null,
+      reason: record.reason ?? "Execution could not be proven stopped",
+      host: this.hostname,
+      createdAt: nowIso()
+    };
+    await atomicWrite(path.join(canonicalWorkspace, WORKSPACE_FENCE_NAME), fence);
+    return fence;
+  }
+
+  async readWorkspaceFence(workspace) {
+    const canonicalWorkspace = await realpath(workspace).catch(() => path.resolve(workspace));
+    try {
+      return JSON.parse(await readFile(path.join(canonicalWorkspace, WORKSPACE_FENCE_NAME), "utf8"));
+    } catch {
+      return null;
+    }
   }
 
   async readWorkspaceLease(workspace) {

@@ -13,7 +13,7 @@ import { WorkflowOrchestrator } from "../src/workflow-orchestrator.js";
 
 const SCHEMA_PATH = path.resolve("schemas/turn.schema.json");
 
-async function createLifecycle(context) {
+async function createLifecycle(context, runtimeOverrides = {}) {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-lifecycle-"));
   const stateDir = `${workspace}-state`;
   context.after(async () => {
@@ -40,7 +40,8 @@ async function createLifecycle(context) {
         snapshot: async () => ({}),
         validateChanges: () => [],
         validateArtifacts: async () => []
-      }
+      },
+      ...runtimeOverrides
     }
   });
   const orchestrator = new Orchestrator({ config, store, schema, schemaPath: SCHEMA_PATH });
@@ -123,4 +124,57 @@ test("refuses to delete a workflow that holds a live disk lease", async (context
   await running;
   const deleted = await store.deleteTask(task.id);
   assert.equal(deleted.deleted, true);
+});
+
+test("an unproven Herdr stop releases the run lease but keeps a workspace fence", async (context) => {
+  let waitStarted;
+  const waitStartedPromise = new Promise((resolve) => { waitStarted = resolve; });
+  const { config, store, orchestrator, workflowOrchestrator } = await createLifecycle(context, {
+    herdr: {
+      ensureAgent: async () => ({ agentName: "ao-test", kind: "codex" }),
+      dispatch: async (entry) => entry,
+      wait: async (handle) => {
+        waitStarted();
+        await new Promise((_, reject) => {
+          const fail = () => reject(Object.assign(new Error("cancelled"), { details: { cancelled: true } }));
+          if (handle.signal?.aborted) return fail();
+          handle.signal?.addEventListener("abort", fail, { once: true });
+        });
+      },
+      interrupt: async () => ({ interrupted: true, settled: false }),
+      release: async () => {}
+    }
+  });
+  const task = await workflowOrchestrator.createWorkflow("Fence after unproven stop.", {
+    version: 1,
+    runtime: "herdr",
+    nodes: [
+      {
+        id: "build",
+        owner: "alpha",
+        access: "write",
+        workspace: "worktree",
+        writeScopes: ["src/**"]
+      },
+      { id: "gate", type: "approval", dependsOn: ["build"], prompt: "Approve." },
+      { id: "publish", type: "integration", source: "build", dependsOn: ["build", "gate"] }
+    ]
+  });
+  const controller = new AbortController();
+  const running = orchestrator.runTask(task.id, { signal: controller.signal });
+  await waitStartedPromise;
+  await waitFor(async () => (await store.readLease(task.id))?.alive);
+  controller.abort();
+  const finished = await running;
+  assert.equal(finished.status, "failed");
+  assert.equal(await store.readLease(task.id), null);
+  assert.equal((await store.readWorkspaceFence(config.workspace)).kind, "containment");
+
+  const other = await store.createTask("Must not share the fenced workspace.", [
+    { id: "alpha", adapter: "mock", role: "Alpha." }
+  ]);
+  await assert.rejects(
+    () => orchestrator.runTask(other.id),
+    RunLeaseError
+  );
 });

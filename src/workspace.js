@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { runProcess } from "./adapters/process.js";
-import { WORKSPACE_LOCK_NAME } from "./store.js";
+import { WORKSPACE_FENCE_NAME, WORKSPACE_LOCK_NAME } from "./store.js";
 import { isRelativeOutside } from "./utils.js";
 
 const GIT_TIMEOUT_MS = 10_000;
@@ -301,7 +301,7 @@ function ignoredPrefixes(workspace, stateDir) {
 function isInternal(file, ignored) {
   // The lock, its takeover mutex, and heartbeat temp files all share the lock
   // name as a prefix; none of them is user content.
-  if (file.startsWith(WORKSPACE_LOCK_NAME)) return true;
+  if (file.startsWith(WORKSPACE_LOCK_NAME) || file.startsWith(WORKSPACE_FENCE_NAME)) return true;
   return ignored.prefixes.some((prefix) => file.startsWith(prefix));
 }
 

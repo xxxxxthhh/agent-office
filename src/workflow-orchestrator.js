@@ -62,11 +62,19 @@ export class WorkflowOrchestrator {
     try {
       return await this.#runWorkflowWithLease(taskId, leaseId, onEvent, signal);
     } catch (error) {
-      if (!isCancellation(error, signal)) throw error;
-      await this.#markCancelled(taskId, leaseId);
-      task = await this.store.loadTask(taskId);
-      onEvent({ type: "run.finished", taskId, status: task.status, cancelled: true });
-      return task;
+      if (error?.unprovenStop) {
+        await this.#failRun(taskId, leaseId, error);
+        task = await this.store.loadTask(taskId);
+        onEvent({ type: "workflow.run_finished", taskId, status: task.status });
+        return task;
+      }
+      if (isCancellation(error, signal)) {
+        await this.#markCancelled(taskId, leaseId);
+        task = await this.store.loadTask(taskId);
+        onEvent({ type: "run.finished", taskId, status: task.status, cancelled: true });
+        return task;
+      }
+      throw error;
     } finally {
       stopHeartbeat();
       await this.#releaseLease(taskId, leaseId);
@@ -172,6 +180,8 @@ export class WorkflowOrchestrator {
       claimed.map((node) => this.#executeNode(taskId, node.id, leaseId, onEvent, signal))
     );
     const rejected = results.filter((result) => result.status === "rejected");
+    const unproven = rejected.find((result) => result.reason?.unprovenStop);
+    if (unproven) throw unproven.reason;
     const cancellation = rejected.find((result) => isCancellation(result.reason, signal));
     if (cancellation) throw cancellation.reason;
     if (rejected[0]) throw rejected[0].reason;
@@ -314,9 +324,33 @@ export class WorkflowOrchestrator {
     } catch (error) {
       const canInterrupt = runtime && handle && typeof runtime.interrupt === "function";
       if (isCancellation(error, signal)) {
-        if (canInterrupt) await runtime.interrupt(handle).catch(() => {});
-        await this.#reopenCancelledNode(taskId, nodeId, attemptToken, leaseId);
-        throw error;
+        const containment = canInterrupt
+          ? await runtime.interrupt(handle).catch(() => ({ settled: false }))
+          : { settled: true };
+        if (containment?.settled === true) {
+          await this.#reopenCancelledNode(taskId, nodeId, attemptToken, leaseId);
+          throw error;
+        }
+        const failure = await this.#inspectFailedWorkspace(
+          taskId,
+          node,
+          attemptToken,
+          workspace,
+          baseline,
+          error,
+          leaseId,
+          true
+        );
+        await this.#failNode(taskId, nodeId, attemptToken, failure.error, leaseId, failure.violation);
+        await this.store.pinWorkspaceFence(this.config.workspace, {
+          taskId,
+          nodeId,
+          reason: failure.violation?.reason ?? "Execution could not be proven stopped after cancellation"
+        }).catch(() => {});
+        onEvent({ type: "workflow.node_failed", taskId, nodeId, error: failure.error.message });
+        const unproven = new ConfigError(failure.error.message);
+        unproven.unprovenStop = true;
+        throw unproven;
       }
       const containment = canInterrupt
         ? await runtime.interrupt(handle).catch(() => ({ settled: false }))
@@ -693,6 +727,16 @@ export class WorkflowOrchestrator {
       node.completedAt = null;
       refreshParticipants(task);
     }, { nodeId }).catch(() => {});
+  }
+
+  async #failRun(taskId, leaseId, error) {
+    await this.store.updateTask(taskId, "workflow.run_failed", (task) => {
+      if (leaseId && task.workflow.lease && task.workflow.lease.id !== leaseId) return;
+      if (!TERMINAL_TASK_STATUSES.has(task.status)) task.status = "failed";
+      task.failureReason = error.message;
+      task.workflow.lease = null;
+      refreshParticipants(task);
+    }, { error: error.message }).catch(() => {});
   }
 
   async #markCancelled(taskId, leaseId) {
