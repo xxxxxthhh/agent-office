@@ -52,7 +52,8 @@ export function runProcess({
   env = {},
   timeoutMs = 600_000,
   signal = null,
-  onStdoutLine = null
+  onStdoutLine = null,
+  inheritEnv = true
 }) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -66,7 +67,7 @@ export function runProcess({
 
     const child = spawn(command, args, {
       cwd,
-      env: { ...process.env, ...env },
+      env: inheritEnv ? { ...process.env, ...env } : { ...env },
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       // Makes the child a process-group leader so the whole tree can be

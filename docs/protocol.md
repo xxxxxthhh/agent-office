@@ -81,3 +81,9 @@ Turn Protocol 是 Agent Office 与代理之间的最小协作契约。
 5. 将诊断日志写到 stderr。
 
 模型输出偶尔包含 Markdown fence 时，Agent Office 会尝试提取其中的 JSON。完全无法解析时，纯文本会作为 `summary` 保留，状态按 `working` 处理。
+
+## 工作流 attempt result
+
+v2 工作流节点仍使用同一份 Turn Protocol 对象。Herdr / Process runtime 把结果写到操作系统临时目录的 `<task-id>/<node-id>/<attemptToken>.json`，不进 `stateDir`。只有 token 匹配当前 attempt 的结果才会写入任务快照；迟到或错 token 的 drop 会被拒绝。
+
+`command` 节点把 stdout 解析为同一 envelope。`approval` 和 `integration` 不跑模型：前者等人批准，后者由 Agent Office 执行 `ff-only` 发布。

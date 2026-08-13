@@ -1,7 +1,7 @@
 {
   "name": "agent-office",
-  "version": "0.3.0",
-  "description": "A local-first orchestration layer where coding agents collaborate on one shared task.",
+  "version": "0.4.0",
+  "description": "A local-first workflow control plane for Codex, Claude Code, Herdr, and shell tools.",
   "type": "module",
   "bin": {
     "agent-office": "./bin/agent-office.js"
@@ -19,7 +19,7 @@
     "tests/"
   ],
   "scripts": {
-    "check": "node --check bin/agent-office.js && node --check src/capabilities.js && node --check src/server.js && node --check dashboard/app.js && node --check tools/run-tests.mjs && node --check tools/_process-ledger.cjs && node tools/run-tests.mjs",
+    "check": "node --check bin/agent-office.js && node --check src/capabilities.js && node --check src/config.js && node --check src/orchestrator.js && node --check src/workflow-definition.js && node --check src/workflow-orchestrator.js && node --check src/execution-runtimes.js && node --check src/workspaces.js && node --check src/server.js && node --check dashboard/app.js && node --check tools/run-tests.mjs && node --check tools/_process-ledger.cjs && node tools/run-tests.mjs",
     "test": "node tools/run-tests.mjs",
     "demo": "node ./bin/agent-office.js demo"
   },

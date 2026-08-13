@@ -15,6 +15,9 @@ agent-office --help
 ## 已实现
 
 - 共享任务：目标、参与者、状态、轮次和产物统一持久化。
+- DAG 工作流：`mode: "workflow"` 的任务按 ready-set 并行调度，依赖形成 fan-out / join。
+- 隔离写入：唯一 writer 使用 git worktree；含写入的工作流在发布前需要人工 approval 和 `ff-only` integration。
+- 可选 Herdr 运行时：`execution.runtime` 可为 `process` 或 `herdr`；Herdr 只接管 `agent` 节点。
 - 同事邮箱：支持发给团队、指定代理或用户的结构化消息。
 - 返工闭环：已完成的代理收到同事的直接消息后自动重新进入工作状态。
 - 四类适配器：Codex CLI、Claude Code CLI、通用命令和离线 mock。
@@ -137,7 +140,9 @@ cd /path/to/your-project
 
 - Codex 使用 `workspace-write` 沙箱。
 - Claude Code 使用 `acceptEdits` 权限模式。
-- 两者按轮次串行执行，避免同时写同一文件。
+- 串行任务仍按轮次执行。v2 工作流允许只读节点并行，写入只发生在唯一隔离 worktree。
+
+跨工具并行、Herdr 持久 session 和发布门的操作说明见 [v2 工作流手册](docs/workflows.zh-CN.md)。
 
 ## 配置
 
@@ -164,24 +169,39 @@ cd /path/to/your-project
     "maxEventFileBytes": 5242880,
     "maxRunFiles": 500
   },
+  "execution": {
+    "runtime": "process",
+    "maxConcurrency": 4,
+    "leaseTimeoutMs": 60000,
+    "snapshotMaxFiles": 50000,
+    "herdrCommand": "herdr",
+    "herdrSession": "agent-office",
+    "herdrServerMode": "external",
+    "herdrPathPrefixes": [],
+    "keepAgents": true
+  },
   "agents": [
     {
       "id": "codex",
       "adapter": "codex",
       "role": "Primary implementer. Make small, verified changes and report concrete evidence.",
       "sandbox": "workspace-write",
-      "ephemeral": true
+      "ephemeral": true,
+      "herdrArgs": ["--sandbox", "workspace-write", "--ask-for-approval", "never"]
     },
     {
       "id": "claude",
       "adapter": "claude",
       "role": "Peer reviewer and collaborator. Inspect current work, fix valid issues, and communicate actionable findings.",
       "permissionMode": "acceptEdits",
-      "noSessionPersistence": true
+      "noSessionPersistence": true,
+      "herdrArgs": ["--permission-mode", "acceptEdits"]
     }
   ]
 }
 ```
+
+`agent-office init` 仍把 `stateDir` 放在项目内 `.agent-office`，串行任务兼容这个默认。创建 v2 工作流时必须把 `stateDir` 改到 executor workspace 之外，否则 `workflow create` 会拒绝。`execution.runtime` 默认为 `process`；`runtime: "herdr"` 只影响 `agent` 节点。
 
 `routing.enabled` 默认开启。Agent Office 不会为了“探测模型”发起付费模型请求：
 
@@ -259,6 +279,9 @@ agent-office task show <task-id> [--json] [--config path]
 agent-office task archive <task-id> [--config path]
 agent-office task unarchive <task-id> [--config path]
 agent-office task delete <task-id> --yes [--config path]
+agent-office workflow create --objective "..." --file workflow.json [--config path]
+agent-office workflow approve <task-id> <node-id> [--config path]
+agent-office workflow retry <task-id> <node-id> [--config path]
 agent-office message send <task-id> --body "..." [--to agent|team] [--config path]
 agent-office run <task-id> [--rounds N] [--config path]
 agent-office serve [--host 127.0.0.1] [--port 4177] [--open] [--config path]
@@ -282,10 +305,9 @@ agent-office demo
 
 ## 设计边界
 
-MVP 有意采用确定性的串行轮次，而不是让多个编码代理同时修改相同目录。它已经解决“共同目标、同事消息、交接、返工、恢复和审计”，暂未包含：
+串行任务仍使用确定性轮次；v2 工作流允许只读并行，并把唯一 writer 隔离到 worktree。当前明确不包含：
 
 - 跨机器调度或中心服务；
-- 并行 worktree 隔离与自动合并；
 - 超出预算时自动停止（用量只记录和展示，不强制执行）、速率限制和组织级审批策略；
 - Codex 的美元费用（该 CLI 只上报 token，因此混合任务的费用合计是部分值）；
 - 对 Claude 账号模型权限做无费用的强验证（CLI 当前没有稳定的模型目录枚举命令，系统会区分 `advertised`、`unverified` 与 `configured`）；

@@ -3,7 +3,7 @@ import { readFile, watch } from "node:fs";
 import { readFile as readFileAsync } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { RunLeaseError, TaskNotFoundError } from "./errors.js";
+import { ConfigError, RunLeaseError, TaskNotFoundError } from "./errors.js";
 import { PACKAGE_ROOT } from "./runtime.js";
 import { diffSince } from "./workspace.js";
 import { totalUsage } from "./usage.js";
@@ -206,6 +206,19 @@ export class DashboardServer {
           return this.#json(response, 409, { error: "Task is already running" });
         }
         return this.#json(response, 202, { taskId, status: "starting" });
+      }
+
+      const nodeActionMatch = url.pathname.match(
+        /^\/api\/tasks\/(task-\d{8}-[a-f0-9]{8})\/nodes\/([A-Za-z0-9][A-Za-z0-9_-]*)\/(approve|retry)$/
+      );
+      if (nodeActionMatch) {
+        await readJsonBody(request);
+        const [, taskId, nodeId, action] = nodeActionMatch;
+        const node = action === "approve"
+          ? await this.store.approveWorkflowNode(taskId, nodeId)
+          : await this.store.retryWorkflowNode(taskId, nodeId);
+        this.#broadcast("state", { reason: `workflow.node_${action}`, taskId, nodeId });
+        return this.#json(response, 200, node);
       }
 
       const archiveMatch = url.pathname.match(
@@ -486,7 +499,13 @@ export class DashboardServer {
       return;
     }
     const statusCode = error.statusCode
-      ?? (error instanceof TaskNotFoundError ? 404 : error instanceof SyntaxError ? 400 : 500);
+      ?? (error instanceof TaskNotFoundError
+        ? 404
+        : error instanceof SyntaxError
+          ? 400
+          : error instanceof ConfigError
+            ? 409
+            : 500);
     this.#json(response, statusCode, {
       error: statusCode === 500 ? "Internal server error" : error.message
     });
@@ -506,7 +525,23 @@ function taskSummary(task) {
     turnCount: task.turns.length,
     participants: task.participants,
     routing: task.routing,
-    usage: totalUsage(task.turns)
+    usage: totalUsage(task.turns),
+    mode: task.mode ?? "rounds",
+    workflow: task.workflow ? {
+      runtime: task.workflow.runtime,
+      maxConcurrency: task.workflow.maxConcurrency,
+      order: task.workflow.order,
+      nodes: Object.fromEntries(task.workflow.order.map((nodeId) => {
+        const node = task.workflow.nodes[nodeId];
+        return [nodeId, {
+          id: node.id,
+          type: node.type,
+          owner: node.owner,
+          status: node.status,
+          dependsOn: node.dependsOn
+        }];
+      }))
+    } : null
   };
 }
 

@@ -11,13 +11,15 @@ import { loadTurnSchema } from "../src/protocol.js";
 import { DEFAULT_SCHEMA_PATH } from "../src/runtime.js";
 import { DashboardServer } from "../src/server.js";
 import { TaskStore } from "../src/store.js";
+import { WorkflowOrchestrator } from "../src/workflow-orchestrator.js";
 
 async function createTestServer(context, options = {}) {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-server-"));
+  const stateDir = options.externalStateDir ? `${workspace}-state` : (options.stateDir ?? ".state");
   const config = normalizeConfig({
     version: 1,
     workspace,
-    stateDir: ".state",
+    stateDir,
     collaboration: { maxRounds: 2, transcriptMessages: 20, turnTimeoutMs: 5000 },
     routing: options.routing,
     agents: options.agents ?? [{
@@ -41,6 +43,21 @@ async function createTestServer(context, options = {}) {
     schema,
     schemaPath: DEFAULT_SCHEMA_PATH
   });
+  const workflowOrchestrator = new WorkflowOrchestrator({
+    config,
+    store,
+    schema,
+    schemaPath: DEFAULT_SCHEMA_PATH,
+    runtimeOverrides: {
+      workspaceManager: {
+        resolve: async () => workspace,
+        snapshot: async () => ({}),
+        validateChanges: () => [],
+        validateArtifacts: async () => []
+      }
+    }
+  });
+  orchestrator.setWorkflowOrchestrator(workflowOrchestrator);
   const server = new DashboardServer({
     config,
     store,
@@ -52,8 +69,11 @@ async function createTestServer(context, options = {}) {
   context.after(async () => {
     await server.close();
     await rm(workspace, { recursive: true, force: true });
+    if (path.isAbsolute(config.stateDir) && config.stateDir !== workspace) {
+      await rm(config.stateDir, { recursive: true, force: true });
+    }
   });
-  return { server, config, store };
+  return { server, config, store, workflowOrchestrator };
 }
 
 test("serves the dashboard and a bounded operational health snapshot", async (context) => {
@@ -191,6 +211,46 @@ test("rejects messages to configured agents that were not assigned to the task",
   });
   assert.equal(response.status, 400);
   assert.match((await response.json()).error, /Unknown message recipient/);
+});
+
+test("approves a workflow gate through the loopback control API", async (context) => {
+  const { server, workflowOrchestrator } = await createTestServer(context, {
+    externalStateDir: true,
+    agents: [{
+      id: "worker",
+      adapter: "mock",
+      role: "Prepare the workflow.",
+      replies: [{
+        summary: "Preparation completed.",
+        status: "done",
+        messages: [],
+        artifacts: [],
+        needsUser: false
+      }]
+    }]
+  });
+  const task = await workflowOrchestrator.createWorkflow("Pause before the final step.", {
+    version: 1,
+    nodes: [
+      { id: "prepare", owner: "worker" },
+      { id: "gate", type: "approval", dependsOn: ["prepare"], prompt: "Approve final step." }
+    ]
+  });
+  const runResponse = await jsonRequest(`${server.url}/api/tasks/${task.id}/run`, {});
+  assert.equal(runResponse.status, 202);
+  await waitFor(async () => {
+    const current = await (await fetch(`${server.url}/api/tasks/${task.id}`)).json();
+    return current.status === "awaiting_input" ? current : null;
+  });
+
+  const approved = await jsonRequest(
+    `${server.url}/api/tasks/${task.id}/nodes/gate/approve`,
+    {}
+  );
+  assert.equal(approved.status, 200);
+  assert.equal((await approved.json()).status, "succeeded");
+  const current = await (await fetch(`${server.url}/api/tasks/${task.id}`)).json();
+  assert.equal(current.status, "ready");
 });
 
 function jsonRequest(url, body) {

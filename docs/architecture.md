@@ -26,6 +26,10 @@ flowchart LR
     O <--> S["Task Store"]
     S --> J["Task snapshots"]
     S --> E["events.jsonl"]
+    O --> WO["Workflow orchestrator"]
+    WO --> ER["Process / Herdr runtime"]
+    WO --> WT["Workspace manager"]
+    WT --> IW["Isolated worktree"]
     O --> P["Prompt builder"]
     P --> C["Codex adapter"]
     P --> A["Claude adapter"]
@@ -33,6 +37,8 @@ flowchart LR
     C --> W["Shared workspace"]
     A --> W
     X --> W
+    ER --> W
+    ER --> IW
     C --> R["Turn Protocol response"]
     A --> R
     X --> R
@@ -42,6 +48,8 @@ flowchart LR
 ### Orchestrator
 
 调度器负责轮次、停止条件和状态转换，不负责替代理决定具体实现。创建任务时，能力路由器先保存任务画像和分配快照；后续轮次严格按快照中的代理、模型、推理强度和顺序执行。
+
+`task.mode === "workflow"` 时，`Orchestrator.runTask` 转交给 `WorkflowOrchestrator`。工作流按 DAG ready-set 并行调度，使用任务快照里的 workflow lease（不是串行任务的磁盘租约）。`src/workspace.js` 继续服务串行任务的 baseline / diff；`src/workspaces.js` 服务 workflow 的 worktree 与 `ff-only` 发布。
 
 ### Capability registry 与 router
 
@@ -98,7 +106,7 @@ done --收到同事直接消息--> working
 - 心跳兼作 fence：发现锁已易主时中止本方运行（`run.lost`），只刷新仍属于自己的锁；
 - 由此，被强制杀死的运行留下的 `running` 任务可以被识别为"过期运行"并直接恢复，而不是永久卡死。
 
-租约是**运行期**事实，不进入任务快照；任务快照仍然只描述协作进度本身。
+串行任务的租约是**运行期**事实，不进入任务快照。工作流另有一份写在 `task.workflow.lease` 里的调度器租约，用来挡住第二个 scheduler 以及人工 approve/retry。两套锁不要互相覆盖。
 
 ### 取消
 
@@ -109,7 +117,7 @@ done --收到同事直接消息--> working
 `agent-office serve` 在 loopback 地址启动零依赖 HTTP 服务：
 
 - REST API 读取任务、事件、能力目录和运行时指标；
-- 写 API 创建任务、发送消息和异步启动任务；
+- 写 API 创建任务、发送消息、异步启动任务，以及工作流节点的 approve / retry；
 - SSE 推送编排事件与文件状态变化；
 - 单页控制台展示任务、路由计划、模型/工具、代理、消息、最新输出和运行事件。
 
@@ -138,7 +146,7 @@ runTurn({ prompt, workspace, timeoutMs, model, effort, signal, onProgress })
 
 ### 串行轮次优先
 
-首版在同一工作区串行运行代理。这样同事能看到前一位的真实文件状态，并避免并发覆盖。未来的并行执行应先为每位代理创建隔离 worktree，再通过受审合并进入共享分支。
+串行任务仍在同一工作区轮次执行。v2 工作流把只读节点并行化，唯一 writer 使用隔离 worktree，发布必须经过人工 approval 和 Agent Office 独占的 `ff-only` integration。
 
 ### 结构化消息而非抓取自然语言
 
@@ -154,8 +162,8 @@ Agent Office 不保存 Codex 或 Claude 凭据，也不尝试绕过权限。适�
 
 ## 扩展路线
 
-1. worktree 执行器：每个代理隔离分支，合并前运行检查。
-2. 审批策略：按文件、命令、成本和外部写操作设置 gate。
+1. 工作流控制面的 HTTP 创建接口（当前仍用 `workflow create --file`）。
+2. 按文件、命令、成本和外部写操作细化审批策略。
 3. 远程 worker：在认证和加密边界内使用相同 Turn Protocol 接入容器或其他机器。
 4. 上下文压缩器：对长任务生成经过引用的共享工作记忆。
 5. 成本与性能监控：接入真实 provider 用量、延迟和错误率。

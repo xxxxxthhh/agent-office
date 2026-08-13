@@ -1,6 +1,6 @@
 # Agent Office 用户手册
 
-适用版本：0.3.0
+适用版本：0.4.0
 
 本手册描述 Agent Office 当前**实际实现**的行为。文末的[明确不包含的能力](#15-明确不包含的能力)列出了已知边界，请一并阅读。
 
@@ -26,6 +26,7 @@
 14. [安全模型](#14-安全模型)
 15. [明确不包含的能力](#15-明确不包含的能力)
 16. [故障排查](#16-故障排查)
+17. [工作流（v2 / Herdr DAG）](#17-工作流v2--herdr-dag)
 
 ---
 
@@ -49,7 +50,7 @@ Agent Office 是一个**本地优先的多代理编排层**。它让 Codex CLI�
 
 ### 不适合的场景
 
-- 需要多个代理**并行**修改同一目录（本版本刻意串行执行，见[设计取舍](#92-为什么是串行轮次)）；
+- 需要多个代理**同时写入同一工作区目录**（串行任务仍刻意单写者；v2 工作流把唯一 writer 放到隔离 worktree，见 [17](#17-工作流v2--herdr-dag)）；
 - 需要跨机器调度、团队共享服务或组织级审批；
 - 把它当作无人值守的自动化流水线——它会执行真实的文件修改，需要人在场。
 
@@ -362,6 +363,9 @@ agent-office task show <task-id> [--json] [--config path]
 agent-office task archive <task-id> [--config path]
 agent-office task unarchive <task-id> [--config path]
 agent-office task delete <task-id> --yes [--config path]
+agent-office workflow create --objective "..." --file workflow.json [--config path]
+agent-office workflow approve <task-id> <node-id> [--config path]
+agent-office workflow retry <task-id> <node-id> [--config path]
 agent-office message send <task-id> --body "..." [--to agent|team] [--config path]
 agent-office run <task-id> [--rounds N] [--config path]
 agent-office serve [--host 127.0.0.1] [--port 4177] [--open] [--config path]
@@ -395,7 +399,11 @@ agent-office demo
 
 **`message send <task-id> --body "..." [--to ...]`** — 以 `user` 身份发消息。`--to` 默认 `team`，也可以是任务名单内的代理 ID。收件人不在名单内会报错并列出可选值。
 
-**`run <task-id> [--rounds N]`** — 推进任务。`--rounds` 必须是正整数，覆盖 `collaboration.maxRounds`。
+**`workflow create --objective "..." --file workflow.json`** — 从 JSON definition 创建 `mode: "workflow"` 任务。控制状态必须在 executor workspace 之外（把 `stateDir` 设成绝对路径）。当前没有 HTTP 上传 definition 的接口。
+
+**`workflow approve <task-id> <node-id>`** / **`workflow retry <task-id> <node-id>`** — 批准 gate，或把失败/受阻/可返工节点重新标为可调度。它们不立刻执行节点，之后仍要 `run`。
+
+**`run <task-id> [--rounds N]`** — 推进任务。`--rounds` 必须是正整数，覆盖 `collaboration.maxRounds`。对工作流任务会进入 DAG 调度，忽略 `--rounds`。
 
 **`serve [--host] [--port] [--open]`** — 启动本地控制台。`--host` 只接受 `127.0.0.1`、`localhost`、`::1`；`--port` 为 1–65535；`--open` 在服务监听成功后打开浏览器。
 
@@ -683,7 +691,7 @@ done ──(收到同事直接消息)──→ working
 
 ### 9.2 为什么是串行轮次
 
-同一工作区内代理**严格串行**执行，这样后一位能看到前一位的真实文件状态，也避免并发覆盖。代价是吞吐较低。并行执行需要先为每位代理建立隔离 worktree 再做受审合并，本版本不包含。
+同一工作区内的**串行任务**仍然一轮一个代理，这样后一位能看到前一位的真实文件状态，也避免并发覆盖。v2 工作流不再走这条路径：只读节点可以并行，唯一 writer 使用隔离 worktree，发布必须经过 approval 和 `ff-only` integration。详见 [17](#17-工作流v2--herdr-dag)。
 
 ### 9.3 单轮的提示词内容
 
@@ -902,6 +910,8 @@ Agent Office 依次尝试：直接解析 → 提取 Markdown 代码围栏中的 
 | `POST` | `/api/tasks` | `{ objective }` | `201` |
 | `POST` | `/api/tasks/:id/messages` | `{ body, to? }` | `201` |
 | `POST` | `/api/tasks/:id/run` | `{ maxRounds? }` | `202` |
+| `POST` | `/api/tasks/:id/nodes/:nodeId/approve` | `{}` | `200` |
+| `POST` | `/api/tasks/:id/nodes/:nodeId/retry` | `{}` | `200` |
 | `POST` | `/api/tasks/:id/cancel` | `{}` | `202` |
 | `POST` | `/api/tasks/:id/archive` | `{ archived? }` | `200` |
 | `POST` | `/api/capabilities/refresh` | `{}` | `200` |
@@ -1002,7 +1012,7 @@ Agent Office 不保存、不读取、不转发任何 Codex / Claude 凭据。认
 
 | 能力 | 现状 |
 | --- | --- |
-| 并行执行 / worktree 隔离 | 无。刻意串行，见 [9.2](#92-为什么是串行轮次)。 |
+| 同一目录上的并行写入 | 串行任务仍单写者。v2 工作流把 writer 隔离到 worktree，见 [17](#17-工作流v2--herdr-dag)。 |
 | 跨机器调度、中心服务、多用户 | 无。本地优先，无认证。 |
 | 预算上限与速率限制 | 仅 `claude` 适配器支持 `maxBudgetUsd`。用量会被记录和展示，但**不会**在超阈值时自动停止。 |
 | 组织级审批策略 | 无。 |
@@ -1105,10 +1115,26 @@ Claude Code 会用自带的元 schema 校验 `--json-schema`，并拒绝无法�
 
 ---
 
+## 17. 工作流（v2 / Herdr DAG）
+
+0.4 保留原来的串行轮次，并增加 `mode: "workflow"` 任务。工作流用 JSON definition 描述节点、依赖、workspace 模式和发布门。详细操作、安全边界和示例见 [v2 工作流手册](workflows.zh-CN.md) 与 `examples/workflow.herdr-feature.json`。
+
+最小路径：
+
+1. 把 `stateDir` 设到工作区外面（workflow create 会拒绝工作区内的控制状态）；
+2. `agent-office workflow create --objective "..." --file workflow.json`；
+3. `agent-office run <task-id>`；
+4. 节点停在 `awaiting_approval` 时 `workflow approve`，失败或返工时 `workflow retry`，然后再 `run`。
+
+`execution.runtime` 默认为 `process`。`runtime: "herdr"` 只影响 `agent` 节点；`command` 和 `integration` 始终走本地 Process Runtime。控制台会显示节点状态，并提供批准 / 重试按钮。
+
+---
+
 ## 附录：相关文档
 
 - [README](../README.md) — 项目概览与快速开始
 - [架构文档](architecture.md) — 组件、决策与扩展路线
 - [协作协议](protocol.md) — Turn Protocol 详细说明
+- [v2 工作流手册](workflows.zh-CN.md) — Herdr DAG、worktree 与发布门
 - [一键启动器与桌面壳实施计划](future-launcher-plan.md) — 未来的一键初始化、环境检查和控制台启动流程
 - [`schemas/turn.schema.json`](../schemas/turn.schema.json) — 正式 Schema

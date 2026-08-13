@@ -47,6 +47,12 @@ export class Orchestrator {
     const externalSignal = options.signal ?? null;
     const runId = options.runId ?? randomUUID();
     let task = await this.store.loadTask(taskId);
+    if (task.mode === "workflow") {
+      if (!this.workflowOrchestrator) {
+        throw new ConfigError("Workflow task requires a WorkflowOrchestrator runtime");
+      }
+      return this.workflowOrchestrator.runWorkflow(taskId, options);
+    }
     this.#assertTaskRoster(task);
     if (["completed", "awaiting_input", "failed"].includes(task.status)) return task;
 
@@ -238,6 +244,10 @@ export class Orchestrator {
     task = await this.store.loadTask(taskId);
     onEvent({ type: "run.finished", taskId, runId, status: task.status, cancelled });
     return task;
+  }
+
+  setWorkflowOrchestrator(workflowOrchestrator) {
+    this.workflowOrchestrator = workflowOrchestrator;
   }
 
   describeAgents() {

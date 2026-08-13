@@ -52,6 +52,9 @@ export function normalizeConfig(raw, baseDir, configPath = null) {
     if (agent.args !== undefined) {
       validateStringArray(agent.args, `agents[${index}].args`);
     }
+    if (agent.herdrArgs !== undefined) {
+      validateStringArray(agent.herdrArgs, `agents[${index}].herdrArgs`);
+    }
     if (agent.tools !== undefined) {
       validateTools(agent.tools, `agents[${index}].tools`);
     }
@@ -125,6 +128,45 @@ export function normalizeConfig(raw, baseDir, configPath = null) {
       "retention.maxRunFiles"
     )
   };
+  const execution = {
+    runtime: raw.execution?.runtime ?? "process",
+    maxConcurrency: positiveInteger(
+      raw.execution?.maxConcurrency,
+      4,
+      "execution.maxConcurrency"
+    ),
+    leaseTimeoutMs: integerAtLeast(
+      raw.execution?.leaseTimeoutMs,
+      60_000,
+      "execution.leaseTimeoutMs",
+      3_000
+    ),
+    snapshotMaxFiles: positiveInteger(
+      raw.execution?.snapshotMaxFiles,
+      50_000,
+      "execution.snapshotMaxFiles"
+    ),
+    herdrCommand: raw.execution?.herdrCommand ?? "herdr",
+    herdrSession: raw.execution?.herdrSession ?? "agent-office",
+    herdrServerMode: raw.execution?.herdrServerMode ?? "external",
+    herdrPathPrefixes: raw.execution?.herdrPathPrefixes ?? [],
+    keepAgents: raw.execution?.keepAgents !== false
+  };
+  if (!["process", "herdr"].includes(execution.runtime)) {
+    throw new ConfigError("execution.runtime must be process or herdr");
+  }
+  assertNonEmptyString(execution.herdrCommand, "execution.herdrCommand");
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(execution.herdrSession)) {
+    throw new ConfigError("execution.herdrSession contains unsupported characters");
+  }
+  if (!["external", "managed"].includes(execution.herdrServerMode)) {
+    throw new ConfigError("execution.herdrServerMode must be external or managed");
+  }
+  validateStringArray(execution.herdrPathPrefixes, "execution.herdrPathPrefixes");
+  if (execution.herdrPathPrefixes.some((entry) => !path.isAbsolute(entry))) {
+    throw new ConfigError("execution.herdrPathPrefixes entries must be absolute directories");
+  }
+  execution.herdrPathPrefixes = [...new Set(execution.herdrPathPrefixes)];
 
   return {
     ...raw,
@@ -136,7 +178,8 @@ export function normalizeConfig(raw, baseDir, configPath = null) {
     agents,
     collaboration,
     routing,
-    retention
+    retention,
+    execution
   };
 }
 
@@ -167,20 +210,36 @@ export async function writeStarterConfig(targetDirectory) {
       maxEventFileBytes: 5242880,
       maxRunFiles: 500
     },
+    execution: {
+      runtime: "process",
+      maxConcurrency: 4,
+      leaseTimeoutMs: 60000,
+      snapshotMaxFiles: 50000,
+      herdrCommand: "herdr",
+      herdrSession: "agent-office",
+      herdrServerMode: "external",
+      herdrPathPrefixes: [],
+      keepAgents: true
+    },
     agents: [
       {
         id: "codex",
         adapter: "codex",
         role: "Primary implementer. Make small, verified changes and report concrete evidence.",
         sandbox: "workspace-write",
-        ephemeral: true
+        ephemeral: true,
+        herdrArgs: [
+          "--sandbox", "workspace-write",
+          "--ask-for-approval", "never"
+        ]
       },
       {
         id: "claude",
         adapter: "claude",
         role: "Peer reviewer and collaborator. Inspect current work, fix valid issues, and communicate actionable findings.",
         permissionMode: "acceptEdits",
-        noSessionPersistence: true
+        noSessionPersistence: true,
+        herdrArgs: ["--permission-mode", "acceptEdits"]
       }
     ]
   };
@@ -193,6 +252,14 @@ function positiveInteger(value, fallback, name) {
   if (value === undefined) return fallback;
   if (!Number.isInteger(value) || value < 1) {
     throw new ConfigError(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+function integerAtLeast(value, fallback, name, minimum) {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || value < minimum) {
+    throw new ConfigError(`${name} must be an integer of at least ${minimum}`);
   }
   return value;
 }
