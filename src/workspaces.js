@@ -41,6 +41,20 @@ export class WorkspaceManager {
     if (await lstat(worktreePath).catch(() => null)) {
       throw new ConfigError(`Refusing to reuse an unregistered worktree path: ${worktreePath}`);
     }
+    // git worktree add fails with a bare exit code 128 on a repository that has
+    // no commits yet, which is a state a brand new project is very likely in.
+    const head = await runProcess({
+      command: "git",
+      args: ["rev-parse", "--verify", "HEAD"],
+      cwd: this.config.workspace,
+      timeoutMs: 30_000
+    }).catch(() => null);
+    if (!head) {
+      throw new ConfigError(
+        `Workspace ${this.config.workspace} has no commits yet, so a writing node has nothing to branch from. `
+        + "Make an initial commit first."
+      );
+    }
     if (task.workflow.runtime === "herdr" && this.createHerdrWorktree) {
       await this.createHerdrWorktree({
         cwd: this.config.workspace,

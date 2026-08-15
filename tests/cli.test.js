@@ -264,3 +264,84 @@ test("the packaged demo dashboard config ships and loads", async () => {
   assert.ok(config.agents.length >= 1);
   assert.ok(config.agents.every((agent) => agent.adapter === "mock"), "the demo must not call a real provider");
 });
+
+test("workflow create resolves packaged examples by name", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-example-"));
+  const stateDir = `${workspace}-state`;
+  context.after(async () => {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  const configPath = path.join(workspace, "agent-office.json");
+  const reply = { summary: "ok", status: "done", messages: [], artifacts: [], needsUser: false };
+  await writeFile(configPath, JSON.stringify({
+    version: 1,
+    workspace,
+    stateDir,
+    agents: [
+      { id: "codex", adapter: "mock", role: "Implement.", replies: [reply] },
+      { id: "claude", adapter: "mock", role: "Review.", replies: [reply] }
+    ]
+  }));
+
+  // An installed CLI has the examples in its package directory; --file resolves
+  // against the caller's cwd, where they do not exist.
+  const created = await runProcess({
+    command: process.execPath,
+    args: [
+      CLI_PATH, "workflow", "create",
+      "--config", configPath,
+      "--objective", "Use the packaged example by name.",
+      "--example", "process-review"
+    ],
+    cwd: workspace,
+    timeoutMs: 30_000
+  });
+  assert.match(created.stdout.trim(), /^task-\d{8}-[a-f0-9]{8}$/);
+
+  await assert.rejects(
+    () => runProcess({
+      command: process.execPath,
+      args: [
+        CLI_PATH, "workflow", "create",
+        "--config", configPath,
+        "--objective", "Unknown example.",
+        "--example", "no-such-example"
+      ],
+      cwd: workspace,
+      timeoutMs: 30_000
+    }),
+    (error) => {
+      assert.match(error.details.stderr, /Unknown workflow example: no-such-example/);
+      assert.match(error.details.stderr, /process-review/);
+      return true;
+    }
+  );
+});
+
+test("init rejects agent ids it would otherwise drop", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-agents-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+
+  // Silently dropping "typo" wrote a config that did not match what the command
+  // echoed back; a duplicate id only failed later, inside doctor.
+  await assert.rejects(
+    () => runProcess({
+      command: process.execPath,
+      args: [CLI_PATH, "init", workspace, "--agents", "codex,typo"],
+      cwd: PACKAGE_ROOT,
+      timeoutMs: 30_000
+    }),
+    (error) => {
+      assert.match(error.details.stderr, /Unknown agent\(s\) for --agents: typo/);
+      return true;
+    }
+  );
+  const deduped = await runProcess({
+    command: process.execPath,
+    args: [CLI_PATH, "init", workspace, "--agents", "codex,codex"],
+    cwd: PACKAGE_ROOT,
+    timeoutMs: 30_000
+  });
+  assert.match(deduped.stdout, /Agents: codex$/m);
+});

@@ -256,3 +256,23 @@ async function integrationFixture(context, prefix) {
   const worktree = await manager.resolve(task, node);
   return { root, repository, manager, task, node, worktree };
 }
+
+test("a repository with no commits says so instead of failing with a git exit code", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-office-unborn-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const repository = path.join(root, "repo");
+  await mkdir(repository);
+  await runProcess({ command: "git", args: ["init"], cwd: repository, timeoutMs: 10_000 });
+  const manager = new WorkspaceManager({ config: { workspace: repository } });
+  const node = { id: "build", workspace: "worktree", workspaceFrom: null, access: "write", writeScopes: ["src/**"] };
+  const task = { id: "task-20260813-abcdef12", workflow: { runtime: "process", nodes: { build: node } } };
+
+  // A brand new project is very likely in exactly this state, and `git worktree
+  // add` reports it as a bare exit code 128.
+  await assert.rejects(() => manager.resolve(task, node), (error) => {
+    assert.ok(error instanceof ConfigError, error.name);
+    assert.match(error.message, /has no commits yet/);
+    assert.match(error.message, /initial commit/);
+    return true;
+  });
+});

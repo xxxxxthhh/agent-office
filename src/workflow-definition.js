@@ -43,7 +43,13 @@ export function normalizeWorkflowDefinition(raw, config) {
     if (type === "agent") {
       const owner = assertNonEmptyString(entry.owner, `nodes.${id}.owner`);
       if (!configuredAgents.has(owner)) {
-        throw new ConfigError(`Node "${id}" references unknown agent "${owner}"`);
+        // Naming what is configured turns this from a dead end into an edit:
+        // a machine with only one provider CLI gets a config with one agent,
+        // while a shipped definition may name two.
+        throw new ConfigError(
+          `Node "${id}" references unknown agent "${owner}". `
+          + `Configured agents: ${[...configuredAgents].join(", ") || "(none)"}`
+        );
       }
     }
     if (type === "command") {

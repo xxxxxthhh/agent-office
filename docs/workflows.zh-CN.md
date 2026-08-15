@@ -50,7 +50,7 @@ herdr --session agent-office server
 
 ## 2. 定义 DAG
 
-工作流是 JSON。可直接复制 [workflow.herdr-feature.json](../examples/workflow.herdr-feature.json)。核心节点：
+工作流是 JSON。随包发布的 definition 可以直接用：`--example process-review`（本地 Process Runtime，任何仓库都能跑）或 `--example herdr-feature`（Herdr 常驻 session + `npm test`）。想改的话，复制 [workflow.process-review.json](../examples/workflow.process-review.json) 或 [workflow.herdr-feature.json](../examples/workflow.herdr-feature.json) 再传 `--file`。核心节点：
 
 - `agent`：由配置中的 Codex、Claude Code 或其他代理执行；
 - `command`：以参数数组直接启动命令，不经过 shell 插值；
@@ -75,7 +75,7 @@ v1 写入策略刻意保守：
 ```bash
 TASK_ID=$(agent-office workflow create \
   --objective "实现一个边界安全的功能，补齐测试并通过独立审查" \
-  --file ./examples/workflow.herdr-feature.json)
+  --example process-review)
 
 agent-office run "$TASK_ID"
 agent-office task show "$TASK_ID"

@@ -1,7 +1,7 @@
 import path from "node:path";
 import os from "node:os";
 import { execFile } from "node:child_process";
-import { access, constants, mkdir, mkdtemp, readFile } from "node:fs/promises";
+import { access, constants, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { normalizeConfig, writeStarterConfig, STARTER_AGENTS } from "./config.js";
 import { RunLeaseError } from "./errors.js";
@@ -71,6 +71,7 @@ async function prepareNetworkEnvironment(io, options) {
 async function startCommand(args, io, options) {
   const host = takeOption(args, "--host");
   const port = takeOption(args, "--port");
+  const requestedAgents = takeOption(args, "--agents");
   rejectExtraArgs(args);
   const workspace = path.resolve(options.cwd ?? process.cwd());
   const configPath = path.join(workspace, "agent-office.json");
@@ -86,7 +87,7 @@ async function startCommand(args, io, options) {
       io.log("Initialization cancelled; no files were changed.");
       return 0;
     }
-    const { agents } = await resolveStarterAgents(takeOption(args, "--agents"));
+    const { agents } = await resolveStarterAgents(requestedAgents);
     const createdPath = await writeStarterConfig(workspace, { agents });
     io.log(`Created ${createdPath} with agents: ${agents.join(", ")}`);
   }
@@ -128,7 +129,7 @@ async function confirmInitialization(workspace) {
   const prompt = createInterface({ input: process.stdin, output: process.stdout });
   try {
     const answer = await prompt.question(
-      "Initialize this project with the default Codex + Claude configuration? [y/N] "
+      "Initialize this project with a configuration for the agent CLIs found on PATH? [y/N] "
     );
     return /^(y|yes)$/i.test(answer.trim());
   } finally {
@@ -161,8 +162,15 @@ async function initCommand(args, io) {
 // then the file is a template rather than a description of this machine.
 async function resolveStarterAgents(requested) {
   if (requested) {
-    const agents = requested.split(",").map((value) => value.trim()).filter(Boolean);
+    const known = Object.keys(STARTER_AGENTS);
+    const agents = [...new Set(requested.split(",").map((value) => value.trim()).filter(Boolean))];
     if (!agents.length) throw new Error("--agents requires at least one agent id");
+    // Dropping an unknown id silently writes a config that does not match what
+    // the command echoed back, and a duplicate one only fails later in doctor.
+    const unknown = agents.filter((id) => !known.includes(id));
+    if (unknown.length) {
+      throw new Error(`Unknown agent(s) for --agents: ${unknown.join(", ")}. Known: ${known.join(", ")}`);
+    }
     return { agents, detected: true };
   }
   const found = [];
@@ -172,6 +180,24 @@ async function resolveStarterAgents(requested) {
   return found.length
     ? { agents: found, detected: true }
     : { agents: Object.keys(STARTER_AGENTS), detected: false };
+}
+
+const EXAMPLES_DIR = path.join(PACKAGE_ROOT, "examples");
+
+async function listWorkflowExamples() {
+  const entries = await readdir(EXAMPLES_DIR).catch(() => []);
+  return entries
+    .filter((name) => name.startsWith("workflow.") && name.endsWith(".json"))
+    .map((name) => name.slice("workflow.".length, -".json".length))
+    .sort();
+}
+
+async function resolveWorkflowExample(name) {
+  const available = await listWorkflowExamples();
+  if (!available.includes(name)) {
+    throw new Error(`Unknown workflow example: ${name}. Available: ${available.join(", ")}`);
+  }
+  return path.join(EXAMPLES_DIR, `workflow.${name}.json`);
 }
 
 // A configured command may be a bare name to look up on PATH, or a path the
@@ -207,6 +233,10 @@ async function doctorCommand(args, io) {
     ...agent
   }));
 
+  // Anything that makes a configured agent unable to run at all counts the same
+  // as an unavailable provider: reporting it and then exiting 0 would let
+  // `start` treat the check as passed.
+  let unusable = false;
   io.log(`Workspace: ${runtime.config.workspace}`);
   io.log(`State: ${runtime.config.stateDir}`);
   for (const row of rows) {
@@ -228,15 +258,17 @@ async function doctorCommand(args, io) {
     // as spawn ENOENT during the first turn.
     if (row.command && !await commandResolvable(row.command, runtime.config.workspace)) {
       io.log(`  ! command not found or not executable: ${row.command}`);
+      unusable = true;
     }
   }
   if (runtime.config.execution.runtime === "herdr") {
     const herdr = runtime.config.execution.herdrCommand;
-    io.log(
-      await commandResolvable(herdr, runtime.config.workspace)
-        ? `✓ herdr runtime: ${herdr} (session ${runtime.config.execution.herdrSession})`
-        : `✗ herdr runtime: ${herdr} not found; agent nodes cannot start`
-    );
+    if (await commandResolvable(herdr, runtime.config.workspace)) {
+      io.log(`✓ herdr runtime: ${herdr} (session ${runtime.config.execution.herdrSession})`);
+    } else {
+      io.log(`✗ herdr runtime: ${herdr} not found; agent nodes cannot start`);
+      unusable = true;
+    }
   }
   // Serial tasks run happily with control state inside the workspace; every
   // workflow command refuses it. Saying so here beats letting the first
@@ -245,9 +277,11 @@ async function doctorCommand(args, io) {
     await assertControlStateOutsideWorkspace(runtime.config);
     io.log("✓ workflows: control state is outside the workspace");
   } catch (error) {
+    // Not fatal: serial tasks run fine with control state inside the workspace,
+    // and failing here would stop `start` for someone who never uses workflows.
     io.log(`! workflows unavailable: ${error.message}`);
   }
-  return rows.every((row) => row.available) ? 0 : 1;
+  return rows.every((row) => row.available) && !unusable ? 0 : 1;
 }
 
 async function capabilitiesCommand(args, io) {
@@ -399,10 +433,19 @@ async function workflowCommand(args, io) {
   if (subcommand === "create") {
     const objective = takeOption(args, "--objective");
     const file = takeOption(args, "--file");
+    const example = takeOption(args, "--example");
     if (!objective) throw new Error("workflow create requires --objective");
-    if (!file) throw new Error("workflow create requires --file");
+    if (!file && !example) {
+      throw new Error(
+        `workflow create requires --file or --example. Packaged examples: ${(await listWorkflowExamples()).join(", ")}`
+      );
+    }
     rejectExtraArgs(args);
-    const definition = JSON.parse(await readFile(path.resolve(file), "utf8"));
+    // A relative --file only resolves inside a source clone; an installed CLI
+    // has the examples in its package directory, which nobody should have to
+    // find by hand.
+    const definitionPath = example ? await resolveWorkflowExample(example) : path.resolve(file);
+    const definition = JSON.parse(await readFile(definitionPath, "utf8"));
     const task = await runtime.workflowOrchestrator.createWorkflow(objective, definition);
     io.log(task.id);
     return 0;
@@ -564,8 +607,22 @@ async function demoCommand(args, io, options = {}) {
   if (dashboard) {
     // The packaged example is the only zero-cost dashboard config a globally
     // installed CLI can reach: a relative path only resolves inside a clone.
-    const configPath = path.join(PACKAGE_ROOT, "examples", "team.dashboard-demo.json");
-    io.log(`Serving the offline demo team from ${configPath}`);
+    // It is copied into a temp directory first — a global install can sit in a
+    // read-only or root-owned prefix, and demo state has no business being
+    // written inside node_modules either way.
+    const packaged = JSON.parse(
+      await readFile(path.join(EXAMPLES_DIR, "team.dashboard-demo.json"), "utf8")
+    );
+    const root = await mkdtemp(path.join(os.tmpdir(), "agent-office-dashboard-demo-"));
+    const workspace = path.join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const configPath = path.join(root, "agent-office.json");
+    await writeFile(
+      configPath,
+      `${JSON.stringify({ ...packaged, workspace, stateDir: path.join(root, "state") }, null, 2)}\n`,
+      "utf8"
+    );
+    io.log(`Serving the offline demo team from ${root}`);
     return serveCommand([
       "--config", configPath,
       "--open",
@@ -795,7 +852,7 @@ Usage:
   agent-office task archive <task-id> [--config path]
   agent-office task unarchive <task-id> [--config path]
   agent-office task delete <task-id> --yes [--config path]
-  agent-office workflow create --objective "..." --file workflow.json [--config path]
+  agent-office workflow create --objective "..." (--example NAME | --file workflow.json) [--config path]
   agent-office workflow approve <task-id> <node-id> [--config path]
   agent-office workflow retry <task-id> <node-id> [--config path]
   agent-office message send <task-id> --body "..." [--to agent|team] [--config path]

@@ -152,7 +152,7 @@ cd /path/to/your-project
 {
   "version": 1,
   "workspace": ".",
-  "stateDir": ".agent-office",
+  "stateDir": "/Users/you/.local/state/agent-office/my-project-1a2b3c4d",
   "collaboration": {
     "maxRounds": 4,
     "transcriptMessages": 40,
@@ -200,7 +200,7 @@ cd /path/to/your-project
 }
 ```
 
-`agent-office init` 仍把 `stateDir` 放在项目内 `.agent-office`，串行任务兼容这个默认。创建 v2 工作流时必须把 `stateDir` 改到 executor workspace 之外，否则 `workflow create` 会拒绝。`execution.runtime` 默认为 `process`；`runtime: "herdr"` 只影响 `agent` 节点。
+`agent-office init` 把 `stateDir` 写在工作区之外（`$XDG_STATE_HOME` 或 `~/.local/state/agent-office/<项目名>-<摘要>`），v2 工作流因此开箱可用；省略该字段的旧配置仍按项目内 `.agent-office` 解析，那种配置会被 `workflow create` 拒绝。`execution.runtime` 默认为 `process`；`runtime: "herdr"` 只影响 `agent` 节点。
 
 `routing.enabled` 默认开启。Agent Office 不会为了“探测模型”发起付费模型请求：
 
@@ -278,7 +278,7 @@ agent-office task show <task-id> [--json] [--config path]
 agent-office task archive <task-id> [--config path]
 agent-office task unarchive <task-id> [--config path]
 agent-office task delete <task-id> --yes [--config path]
-agent-office workflow create --objective "..." --file workflow.json [--config path]
+agent-office workflow create --objective "..." (--example NAME | --file workflow.json) [--config path]
 agent-office workflow approve <task-id> <node-id> [--config path]
 agent-office workflow retry <task-id> <node-id> [--config path]
 agent-office message send <task-id> --body "..." [--to agent|team] [--config path]

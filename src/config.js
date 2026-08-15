@@ -1,17 +1,28 @@
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { ConfigError } from "./errors.js";
 import { assertNonEmptyString, exists, resolveFrom } from "./utils.js";
 
 export const DEFAULT_CONFIG_NAME = "agent-office.json";
 
+function defaultRealpathSync(target) {
+  try {
+    return realpathSync(target);
+  } catch {
+    return target;
+  }
+}
+
 // Workflows refuse to run while control state sits where an executing agent
 // could rewrite it, so a generated config keeps state outside the workspace
 // entirely. The digest keeps two projects with the same directory name apart.
-export function starterStateDir(workspace) {
-  const canonical = path.resolve(workspace);
+export function starterStateDir(workspace, { realpathSync = defaultRealpathSync } = {}) {
+  // Hash the canonical path so the same repository reached through a symlink
+  // does not get a second, unrelated state directory.
+  const canonical = realpathSync(path.resolve(workspace));
   const base = process.env.XDG_STATE_HOME
     ? path.resolve(process.env.XDG_STATE_HOME)
     : path.join(os.homedir(), ".local", "state");

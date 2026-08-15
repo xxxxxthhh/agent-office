@@ -116,7 +116,7 @@ builder 实现
 ### 3.2 零成本体验控制台
 
 ```bash
-agent-office serve --config ./examples/team.dashboard-demo.json
+agent-office demo --dashboard
 ```
 
 浏览器打开 <http://127.0.0.1:4177>，新建一个任务并点击“启动协作”，即可看到 mock builder/reviewer 的完整返工闭环、路由计划和产物列表。
@@ -132,7 +132,7 @@ agent-office start
 这条命令把真实项目所需的准备步骤串起来：
 
 1. 检查当前目录的 `agent-office.json`；
-2. 配置不存在时请求确认，确认后生成默认 Codex + Claude 配置；
+2. 配置不存在时请求确认，确认后按 PATH 上实际找到的代理 CLI 生成配置（都没找到就两个都写作模板，可用 `--agents` 指定）；
 3. 运行 `doctor` 检查配置中的代理和本机 CLI；
 4. 体检通过后在 `127.0.0.1:4177` 启动服务；
 5. 服务监听成功后自动打开浏览器。
@@ -374,7 +374,7 @@ agent-office task show <task-id> [--json] [--config path]
 agent-office task archive <task-id> [--config path]
 agent-office task unarchive <task-id> [--config path]
 agent-office task delete <task-id> --yes [--config path]
-agent-office workflow create --objective "..." --file workflow.json [--config path]
+agent-office workflow create --objective "..." (--example NAME | --file workflow.json) [--config path]
 agent-office workflow approve <task-id> <node-id> [--config path]
 agent-office workflow retry <task-id> <node-id> [--config path]
 agent-office message send <task-id> --body "..." [--to agent|team] [--config path]
@@ -1147,8 +1147,8 @@ Claude Code 会用自带的元 schema 校验 `--json-schema`，并拒绝无法�
 
 最小路径：
 
-1. 把 `stateDir` 设到工作区外面（workflow create 会拒绝工作区内的控制状态）；
-2. `agent-office workflow create --objective "..." --file workflow.json`；
+1. 确认 `stateDir` 在工作区外面（`init` 生成的配置已经如此；`doctor` 最后一行会确认）；
+2. `agent-office workflow create --objective "..." --example process-review`（或 `--file workflow.json`）；
 3. `agent-office run <task-id>`；
 4. 节点停在 `awaiting_approval` 时 `workflow approve`，失败或返工时 `workflow retry`，然后再 `run`。
 
