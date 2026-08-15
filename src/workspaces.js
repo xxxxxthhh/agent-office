@@ -200,9 +200,45 @@ export class WorkspaceManager {
         `Integration source changed after the writer's verified completion: ${postWriterChanges.join(", ")}`
       );
     }
-    const dirtyFiles = (await listGitChanges(sourceWorkspace))
+    const readDirtyFiles = async () => (await listGitChanges(sourceWorkspace))
       .filter((filePath) => !isWorkspaceLockName(filePath) && !this.#isControlState(sourceWorkspace, filePath));
+    let dirtyFiles = await readDirtyFiles();
     const expectedMessage = `agent-office: ${task.id} ${sourceNode.id}`;
+
+    if (sourceHead !== baseHead) {
+      const [count, message] = await Promise.all([
+        runProcess({
+          command: "git",
+          args: ["rev-list", "--count", `${baseHead}..${sourceHead}`],
+          cwd: sourceWorkspace,
+          timeoutMs: 30_000
+        }),
+        runProcess({
+          command: "git",
+          args: ["log", "-1", "--format=%s", sourceHead],
+          cwd: sourceWorkspace,
+          timeoutMs: 30_000
+        })
+      ]);
+      if (count.stdout.trim() !== "1" || message.stdout.trim() !== expectedMessage) {
+        throw new ConfigError("Writing agents may not create commits; only an Agent Office prepared commit can resume");
+      }
+      if (dirtyFiles.length) {
+        // The writer was reopened and ran again on top of a commit prepared for
+        // its previous attempt. That commit is Agent Office's own — the checks
+        // above prove it, and publication blocks reopening, so it was never
+        // published. Drop it and prepare one commit that contains the rework;
+        // keeping it would publish exactly the work a reviewer sent back.
+        await runProcess({
+          command: "git",
+          args: ["reset", "--soft", baseHead],
+          cwd: sourceWorkspace,
+          timeoutMs: 30_000
+        });
+        sourceHead = baseHead;
+        dirtyFiles = await readDirtyFiles();
+      }
+    }
 
     if (sourceHead === baseHead) {
       if (!projectChanges.length) {
@@ -236,27 +272,6 @@ export class WorkspaceManager {
         cwd: sourceWorkspace,
         timeoutMs: 30_000
       })).stdout.trim();
-    } else {
-      if (dirtyFiles.length) {
-        throw new ConfigError("A prepared integration commit must have a clean source worktree");
-      }
-      const [count, message] = await Promise.all([
-        runProcess({
-          command: "git",
-          args: ["rev-list", "--count", `${baseHead}..${sourceHead}`],
-          cwd: sourceWorkspace,
-          timeoutMs: 30_000
-        }),
-        runProcess({
-          command: "git",
-          args: ["log", "-1", "--format=%s", sourceHead],
-          cwd: sourceWorkspace,
-          timeoutMs: 30_000
-        })
-      ]);
-      if (count.stdout.trim() !== "1" || message.stdout.trim() !== expectedMessage) {
-        throw new ConfigError("Writing agents may not create commits; only an Agent Office prepared commit can resume");
-      }
     }
     const changedFiles = await diffNames(sourceWorkspace, baseHead, sourceHead);
     const outside = changedFiles.filter((filePath) => !matchesAnyScope(filePath, sourceNode.writeScopes));

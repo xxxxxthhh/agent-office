@@ -177,8 +177,7 @@ cd /path/to/your-project
     "herdrCommand": "herdr",
     "herdrSession": "agent-office",
     "herdrServerMode": "external",
-    "herdrPathPrefixes": [],
-    "keepAgents": true
+    "herdrPathPrefixes": []
   },
   "agents": [
     {

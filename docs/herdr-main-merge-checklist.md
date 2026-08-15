@@ -1,8 +1,9 @@
 # 将 `feature/herdr-runtime-dag` 合入 `main` 的清单
 
-状态：**已在 `integrate/herdr-runtime-dag` 做到可 review。** 未开 PR，未推远端。
+状态：**集成完成并已推送 `integrate/herdr-runtime-dag`**（`origin/main` 是其祖先，可 fast-forward）。
+验收：`npm run check` 全绿。经过 0.4 的多轮评审后，本清单第 3 节的集成步骤全部完成；剩下的只有对外合并动作本身。
 
-日期：2026-08-13
+日期：2026-08-13 立；集成状态最后核对于 2026-08-16。
 
 这份清单记录的是一次**语义集成**，不是点 GitHub Merge。Feature 建在另一棵初始历史上，当前 `main` 已经是 reviewed 的 0.3 运行时。共享文件两边都改过；自动合并后的 `store.js` / `orchestrator.js` 尤其不能当正确结果。
 
@@ -43,9 +44,9 @@
 - [x] 拷贝第 5 节的新文件
 - [x] 按第 4 节把能力补进共享文件；`main` 已有行为全部保留
 - [x] 按第 6 节改测试脚本和文档
-- [x] 跑第 7 节验收（`npm test` 与 `npm run check`：158 pass / 0 fail）
-- [ ] 需要对外合入时再开 PR：`integrate/herdr-runtime-dag` → `main`
-- [ ] 确认本地 `main` 的 `bed9245`、`c7be59d` 是否先推到 `origin/main`
+- [x] 跑第 7 节验收（`npm test` 与 `npm run check`；随后的评审轮次又补了回归用例，计数以当前分支为准）
+- [x] `bed9245`、`c7be59d` 已随集成分支进入历史，不再需要单独推 `origin/main`
+- [ ] 需要对外合入时再开 PR 或直接 fast-forward：`integrate/herdr-runtime-dag` → `main`
 
 ## 4. 共享文件：冲突 + 怎么留
 

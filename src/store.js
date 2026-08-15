@@ -304,6 +304,12 @@ export class TaskStore {
         descendant.changedFiles = [];
         descendant.tracePath = null;
         descendant.resultPath = null;
+        // A prepared integration commit describes the writer attempt that
+        // produced it. Reopening that writer makes it stale, and publishing it
+        // afterwards would ship the work the reviewer sent back. Retrying the
+        // integration node alone still keeps its own intent, which is what
+        // stops a retry from committing the same work twice.
+        descendant.publicationIntent = null;
       }
       task.status = "ready";
       return node;

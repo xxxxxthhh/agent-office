@@ -885,6 +885,90 @@ test("retries a prepared integration after divergence without duplicating its co
   );
 });
 
+test("publishes the rework, not the commit prepared before the writer was reopened", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-office-publication-rework-"));
+  context.after(async () => {
+    await rm(root, { recursive: true, force: true });
+    await rm(`${root}-state`, { recursive: true, force: true });
+  });
+  await runProcess({ command: "git", args: ["init"], cwd: root });
+  await runProcess({ command: "git", args: ["config", "user.email", "test@example.com"], cwd: root });
+  await runProcess({ command: "git", args: ["config", "user.name", "Test"], cwd: root });
+  await mkdir(path.join(root, "src"));
+  await writeFile(path.join(root, "src", "seed.js"), "export const seed = true;\n");
+  await runProcess({ command: "git", args: ["add", "."], cwd: root });
+  await runProcess({ command: "git", args: ["commit", "-m", "initial"], cwd: root });
+  const baseHead = (await runProcess({ command: "git", args: ["rev-parse", "HEAD"], cwd: root })).stdout.trim();
+  const config = normalizeConfig({
+    version: 1,
+    workspace: root,
+    stateDir: `${root}-state`,
+    agents: [{ id: "alpha", adapter: "mock", role: "Build." }]
+  }, root);
+  const store = new TaskStore(config.stateDir);
+  const schema = await loadTurnSchema(SCHEMA_PATH);
+  let attempt = 0;
+  const runtime = {
+    ensureAgent: async () => null,
+    dispatch: async (entry) => entry,
+    wait: async (handle) => {
+      attempt += 1;
+      // The second attempt is the rework a reviewer asked for.
+      await writeFile(path.join(handle.workspace, "src", "answer.js"), `export const answer = ${attempt};\n`);
+      return {
+        response: { summary: "built", status: "done", messages: [], artifacts: [], needsUser: false },
+        tracePath: null
+      };
+    },
+    release: async () => {}
+  };
+  const orchestrator = new WorkflowOrchestrator({
+    config,
+    store,
+    schema,
+    schemaPath: SCHEMA_PATH,
+    runtimeOverrides: { process: runtime }
+  });
+  const task = await orchestrator.createWorkflow("Publish the rework.", {
+    version: 1,
+    nodes: [
+      {
+        id: "build",
+        owner: "alpha",
+        access: "write",
+        workspace: "worktree",
+        writeScopes: ["src/**"]
+      },
+      { id: "gate", type: "approval", dependsOn: ["build"], prompt: "Approve." },
+      { id: "publish", type: "integration", source: "build", dependsOn: ["build", "gate"] }
+    ]
+  });
+  await orchestrator.runWorkflow(task.id);
+  await store.approveWorkflowNode(task.id, "gate");
+  // A failed publication is what leaves a prepared commit behind; an untracked
+  // file in the target is the cheapest way to fail one without moving HEAD.
+  await writeFile(path.join(root, "untracked.txt"), "dirty\n");
+  const failed = await orchestrator.runWorkflow(task.id);
+  assert.equal(failed.status, "failed");
+  assert.ok(failed.workflow.nodes.publish.publicationIntent?.sourceHead);
+  await rm(path.join(root, "untracked.txt"));
+
+  await store.retryWorkflowNode(task.id, "build");
+  await orchestrator.runWorkflow(task.id);
+  await store.approveWorkflowNode(task.id, "gate");
+  const completed = await orchestrator.runWorkflow(task.id);
+
+  assert.equal(completed.status, "completed");
+  // The reviewer's change has to be what lands. Reusing the intent prepared
+  // for the first attempt published attempt 1 and reported success.
+  assert.equal(await readFile(path.join(root, "src", "answer.js"), "utf8"), "export const answer = 2;\n");
+  assert.equal(
+    (await runProcess({ command: "git", args: ["rev-list", "--count", `${baseHead}..HEAD`], cwd: root })).stdout.trim(),
+    "1",
+    "the rework was published as more than one commit"
+  );
+});
+
 test("publishes deletions without treating deleted paths as artifacts", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-office-delete-publication-"));
   context.after(async () => {

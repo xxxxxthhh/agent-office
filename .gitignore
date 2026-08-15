@@ -1,6 +1,7 @@
 .agent-office/
 .agent-office-*/
 .agent-office.lock*
+.agent-office.fence*
 node_modules/
 .DS_Store
 coverage/

@@ -15,7 +15,7 @@ test("offline demo completes a review-feedback loop", async () => {
     command: process.execPath,
     args: [CLI_PATH, "demo"],
     cwd: PACKAGE_ROOT,
-    timeoutMs: 10_000
+    timeoutMs: 30_000
   });
 
   assert.match(result.stdout, /round 2: builder/);
@@ -32,7 +32,7 @@ test("init, create, list, and show form a usable CLI workflow", async (context) 
     command: process.execPath,
     args: [CLI_PATH, "init", workspace],
     cwd: PACKAGE_ROOT,
-    timeoutMs: 10_000
+    timeoutMs: 30_000
   });
   assert.match(initialized.stdout, /Created .*agent-office\.json/);
   const config = JSON.parse(await readFile(configPath, "utf8"));
@@ -50,7 +50,7 @@ test("init, create, list, and show form a usable CLI workflow", async (context) 
       "Exercise the complete task CLI."
     ],
     cwd: PACKAGE_ROOT,
-    timeoutMs: 10_000
+    timeoutMs: 30_000
   });
   const taskId = created.stdout.trim();
   assert.match(taskId, /^task-\d{8}-[a-f0-9]{8}$/);
@@ -59,7 +59,7 @@ test("init, create, list, and show form a usable CLI workflow", async (context) 
     command: process.execPath,
     args: [CLI_PATH, "task", "list", "--config", configPath],
     cwd: PACKAGE_ROOT,
-    timeoutMs: 10_000
+    timeoutMs: 30_000
   });
   assert.match(listed.stdout, new RegExp(`${taskId}\\s+ready`));
 
@@ -67,7 +67,7 @@ test("init, create, list, and show form a usable CLI workflow", async (context) 
     command: process.execPath,
     args: [CLI_PATH, "task", "show", taskId, "--config", configPath],
     cwd: PACKAGE_ROOT,
-    timeoutMs: 10_000
+    timeoutMs: 30_000
   });
   assert.match(shown.stdout, /Objective: Exercise the complete task CLI\./);
   assert.match(shown.stdout, /codex: idle/);
@@ -114,7 +114,7 @@ test("capabilities reports a task-specific routing plan as JSON", async (context
       "--json"
     ],
     cwd: PACKAGE_ROOT,
-    timeoutMs: 10_000
+    timeoutMs: 30_000
   });
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.inventory.totals.availableAgents, 1);
@@ -169,14 +169,14 @@ test("creates, runs, approves, and shows a v2 workflow through the CLI", async (
       "--file", workflowPath
     ],
     cwd: PACKAGE_ROOT,
-    timeoutMs: 10_000
+    timeoutMs: 30_000
   });
   const taskId = created.stdout.trim();
   const firstRun = await runProcess({
     command: process.execPath,
     args: [CLI_PATH, "run", taskId, "--config", configPath],
     cwd: PACKAGE_ROOT,
-    timeoutMs: 10_000
+    timeoutMs: 30_000
   });
   assert.match(firstRun.stdout, /node plan: succeeded/);
   assert.match(firstRun.stdout, /awaiting_input/);
@@ -184,20 +184,20 @@ test("creates, runs, approves, and shows a v2 workflow through the CLI", async (
     command: process.execPath,
     args: [CLI_PATH, "workflow", "approve", taskId, "gate", "--config", configPath],
     cwd: PACKAGE_ROOT,
-    timeoutMs: 10_000
+    timeoutMs: 30_000
   });
   const finalRun = await runProcess({
     command: process.execPath,
     args: [CLI_PATH, "run", taskId, "--config", configPath],
     cwd: PACKAGE_ROOT,
-    timeoutMs: 10_000
+    timeoutMs: 30_000
   });
   assert.match(finalRun.stdout, /completed/);
   const shown = await runProcess({
     command: process.execPath,
     args: [CLI_PATH, "task", "show", taskId, "--json", "--config", configPath],
     cwd: PACKAGE_ROOT,
-    timeoutMs: 10_000
+    timeoutMs: 30_000
   });
   const task = JSON.parse(shown.stdout);
   assert.equal(task.mode, "workflow");

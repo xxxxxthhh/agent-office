@@ -242,6 +242,16 @@ agent-office run task-20260731-1a2b3c4d
     "maxEventFileBytes": 5242880,
     "maxRunFiles": 500
   },
+  "execution": {
+    "runtime": "process",
+    "maxConcurrency": 4,
+    "leaseTimeoutMs": 60000,
+    "snapshotMaxFiles": 50000,
+    "herdrCommand": "herdr",
+    "herdrSession": "agent-office",
+    "herdrServerMode": "external",
+    "herdrPathPrefixes": []
+  },
   "agents": [
     {
       "id": "codex",
@@ -271,6 +281,7 @@ agent-office run task-20260731-1a2b3c4d
 | `collaboration` | 对象 | 见下 | 轮次、超时与提示词预算。 |
 | `routing` | 对象 | 见下 | 能力路由。 |
 | `retention` | 对象 | 见下 | 事件日志与原始输出的保留上限。 |
+| `execution` | 对象 | 见下 | v2 工作流的运行时与并发。串行任务不读这些字段，详见 [docs/workflows.zh-CN.md](workflows.zh-CN.md)。 |
 | `agents` | 数组 | 必填 | 至少一个代理。 |
 
 ### 5.2 `collaboration`
@@ -1002,7 +1013,9 @@ Agent Office 不保存、不读取、不转发任何 Codex / Claude 凭据。认
 
 ### 14.5 产物路径
 
-`artifacts` 是代理自报的字符串，Agent Office **不校验、不解析、不打开**这些路径。控制台只把它们当文本显示。
+串行任务里，`artifacts` 是代理自报的字符串，Agent Office **不校验、不解析、不打开**这些路径。控制台只把它们当文本显示。
+
+工作流节点不同：节点提交结果时会校验 `artifacts`——必须是相对路径、不得越出该节点的工作区、且文件必须真实存在，否则该次 attempt 失败（见 `WorkspaceManager.validateArtifacts`）。校验只看路径本身，仍然不解析、不打开文件内容。
 
 ---
 

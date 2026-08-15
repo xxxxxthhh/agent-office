@@ -149,8 +149,7 @@ export function normalizeConfig(raw, baseDir, configPath = null) {
     herdrCommand: raw.execution?.herdrCommand ?? "herdr",
     herdrSession: raw.execution?.herdrSession ?? "agent-office",
     herdrServerMode: raw.execution?.herdrServerMode ?? "external",
-    herdrPathPrefixes: raw.execution?.herdrPathPrefixes ?? [],
-    keepAgents: raw.execution?.keepAgents !== false
+    herdrPathPrefixes: raw.execution?.herdrPathPrefixes ?? []
   };
   if (!["process", "herdr"].includes(execution.runtime)) {
     throw new ConfigError("execution.runtime must be process or herdr");
@@ -218,8 +217,7 @@ export async function writeStarterConfig(targetDirectory) {
       herdrCommand: "herdr",
       herdrSession: "agent-office",
       herdrServerMode: "external",
-      herdrPathPrefixes: [],
-      keepAgents: true
+      herdrPathPrefixes: []
     },
     agents: [
       {

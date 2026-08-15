@@ -37,8 +37,7 @@ Herdr 推荐使用专用命名 session：
     "snapshotMaxFiles": 50000,
     "herdrCommand": "/Users/you/.local/bin/herdr",
     "herdrSession": "agent-office",
-    "herdrServerMode": "external",
-    "keepAgents": true
+    "herdrServerMode": "external"
   }
 }
 ```

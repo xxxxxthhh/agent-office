@@ -84,6 +84,6 @@ Turn Protocol 是 Agent Office 与代理之间的最小协作契约。
 
 ## 工作流 attempt result
 
-v2 工作流节点仍使用同一份 Turn Protocol 对象。Herdr / Process runtime 把结果写到操作系统临时目录的 `<task-id>/<node-id>/<attemptToken>.json`，不进 `stateDir`。只有 token 匹配当前 attempt 的结果才会写入任务快照；迟到或错 token 的 drop 会被拒绝。
+v2 工作流节点仍使用同一份 Turn Protocol 对象。`runtime: "herdr"` 的 agent 节点把结果写到操作系统临时目录的 `<task-id>/<node-id>/<attemptToken>.json`，不进 `stateDir`；只有 token 匹配当前 attempt 的结果才会写入任务快照，迟到或错 token 的 drop 会被拒绝。`runtime: "process"` 的 agent 节点不落 drop 文件，适配器返回的 envelope 直接提交。
 
-`command` 节点把 stdout 解析为同一 envelope。`approval` 和 `integration` 不跑模型：前者等人批准，后者由 Agent Office 执行 `ff-only` 发布。
+`command` 节点不解析 stdout：进程退出码决定成败，Agent Office 用截断后的 stdout/stderr 合成一个 `status: "done"` 的 envelope，完整输出另存为 run 目录里的 `command.json`。`approval` 和 `integration` 不跑模型：前者等人批准，后者由 Agent Office 执行 `ff-only` 发布。
