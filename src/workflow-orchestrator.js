@@ -323,47 +323,19 @@ export class WorkflowOrchestrator {
       });
     } catch (error) {
       const canInterrupt = runtime && handle && typeof runtime.interrupt === "function";
-      if (isCancellation(error, signal)) {
-        const containment = canInterrupt
-          ? await runtime.interrupt(handle).catch(() => ({ settled: false }))
-          : { settled: true };
-        if (containment?.settled === true) {
-          await this.#reopenCancelledNode(taskId, nodeId, attemptToken, leaseId);
-          throw error;
-        }
-        const failure = await this.#inspectFailedWorkspace(
-          taskId,
-          node,
-          attemptToken,
-          workspace,
-          baseline,
-          error,
-          leaseId,
-          true
-        );
-        await this.#failNode(taskId, nodeId, attemptToken, failure.error, leaseId, failure.violation);
-        let fenceError = null;
-        try {
-          await this.store.pinWorkspaceFence(this.config.workspace, {
-            taskId,
-            nodeId,
-            reason: failure.violation?.reason ?? "Execution could not be proven stopped after cancellation"
-          });
-        } catch (error) {
-          // The store has already escalated onto the workspace lock; what is
-          // left here is to never report this as a clean stop.
-          fenceError = error;
-        }
-        onEvent({ type: "workflow.node_failed", taskId, nodeId, error: failure.error.message });
-        const unproven = new ConfigError(
-          fenceError ? `${failure.error.message}; ${fenceError.message}` : failure.error.message
-        );
-        unproven.unprovenStop = true;
-        throw unproven;
-      }
+      const cancelled = isCancellation(error, signal);
       const containment = canInterrupt
         ? await runtime.interrupt(handle).catch(() => ({ settled: false }))
         : { settled: true };
+      // Only an explicit settled:true proves the agent stopped. Every runtime
+      // that can be attached reports it (the process runtime waits for the tree
+      // to die, Herdr inspects the pane), so a missing or false answer means
+      // the execution may still be writing.
+      const settled = containment?.settled === true;
+      if (cancelled && settled) {
+        await this.#reopenCancelledNode(taskId, nodeId, attemptToken, leaseId);
+        throw error;
+      }
       const failure = await this.#inspectFailedWorkspace(
         taskId,
         node,
@@ -372,10 +344,35 @@ export class WorkflowOrchestrator {
         baseline,
         error,
         leaseId,
-        containment.settled === false
+        !settled
       );
       await this.#failNode(taskId, nodeId, attemptToken, failure.error, leaseId, failure.violation);
+      if (settled) {
+        onEvent({ type: "workflow.node_failed", taskId, nodeId, error: failure.error.message });
+        return;
+      }
+      // An unproven stop is the same hazard whether the run was cancelled or
+      // the turn failed: the workspace has to be closed before this run's lease
+      // is released, and the run cannot continue scheduling into it.
+      let fenceError = null;
+      try {
+        await this.store.pinWorkspaceFence(this.config.workspace, {
+          taskId,
+          nodeId,
+          reason: failure.violation?.reason
+            ?? `Execution could not be proven stopped after ${cancelled ? "cancellation" : "failure"}`
+        });
+      } catch (error) {
+        // The store has already escalated onto the workspace lock; what is
+        // left here is to never report this as a clean stop.
+        fenceError = error;
+      }
       onEvent({ type: "workflow.node_failed", taskId, nodeId, error: failure.error.message });
+      const unproven = new ConfigError(
+        fenceError ? `${failure.error.message}; ${fenceError.message}` : failure.error.message
+      );
+      unproven.unprovenStop = true;
+      throw unproven;
     } finally {
       if (runtime && handle) await runtime.release(handle).catch(() => {});
     }

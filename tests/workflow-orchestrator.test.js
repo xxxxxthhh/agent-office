@@ -733,7 +733,7 @@ test("taints a writer worktree when failed read-only QA mutates it and never pub
   await assert.rejects(() => readFile(path.join(root, "src", "qa-marker.js")), /ENOENT/);
 });
 
-test("quarantines a writer worktree when a failed executor cannot be proven stopped", async (context) => {
+test("quarantines the worktree and fences the workspace when a failed executor cannot be proven stopped", async (context) => {
   const fixture = await createFixture(context);
   const runtime = {
     ensureAgent: async () => null,
@@ -788,6 +788,19 @@ test("quarantines a writer worktree when a failed executor cannot be proven stop
     /could not be proven stopped/
   );
   assert.equal(failed.workflow.workspaceTaints.build.nodeId, "review");
+  // A taint only quarantines this task's worktree. The executor that could not
+  // be proven stopped is a hazard to every task sharing the workspace, so an
+  // ordinary failure has to fence it exactly like a cancellation does.
+  assert.equal((await fixture.store.readWorkspaceFence(fixture.config.workspace)).kind, "containment");
+  const other = await fixture.store.createTask("Must not enter the fenced workspace.", [
+    { id: "alpha", adapter: "mock", role: "Alpha." }
+  ]);
+  await assert.rejects(
+    () => fixture.store.acquireRunLease(other.id, "after-failed-stop", {
+      workspace: fixture.config.workspace
+    }),
+    /fenced after an unproven stop/
+  );
 });
 
 test("retries a prepared integration after divergence without duplicating its commit", async (context) => {

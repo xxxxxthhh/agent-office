@@ -11,7 +11,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { runProcess } from "../src/adapters/process.js";
 import { exists, sleep } from "../src/utils.js";
 import { normalizeConfig } from "../src/config.js";
-import { RunLeaseError } from "../src/errors.js";
+import { ConfigError, RunLeaseError } from "../src/errors.js";
 import { Orchestrator } from "../src/orchestrator.js";
 import { loadTurnSchema } from "../src/protocol.js";
 import { DEFAULT_SCHEMA_PATH } from "../src/runtime.js";
@@ -720,6 +720,89 @@ test("a fence that cannot be written keeps the workspace lock instead of releasi
   await assert.rejects(
     () => store.acquireRunLease("task-20260101-00000002", "run-b", { workspace }),
     /fenced after an unproven stop/
+  );
+});
+
+// --- Round 7: containment must be provable, not merely attempted ------------
+
+test("a containment conversion that cannot be persisted is reported as unconfined", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-contain-fail-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const { WORKSPACE_FENCE_NAME, WORKSPACE_LOCK_NAME } = await import("../src/store.js");
+  const { mkdir, stat } = await import("node:fs/promises");
+  const store = new TaskStore(path.join(workspace, ".state"));
+  await store.init();
+  const lease = await store.acquireRunLease("task-20260101-00000001", "unproven-stop", { workspace });
+  // Neither marker can be written: the fence path and the lock path are both
+  // occupied by directories, so the rename has nowhere to land.
+  await mkdir(path.join(workspace, WORKSPACE_FENCE_NAME));
+  await rm(path.join(workspace, WORKSPACE_LOCK_NAME));
+  await mkdir(path.join(workspace, WORKSPACE_LOCK_NAME));
+
+  await assert.rejects(
+    () => store.pinWorkspaceFence(workspace, { taskId: "task-20260101-00000001", nodeId: "build" }),
+    // An in-memory flag dies with the process; claiming containment here would
+    // send the operator away from a workspace nothing is actually guarding.
+    /The workspace is NOT contained/
+  );
+  await lease.release();
+
+  assert.ok(
+    (await stat(path.join(workspace, WORKSPACE_LOCK_NAME))).isDirectory(),
+    "a lock that was never written was reported as the containment marker"
+  );
+});
+
+test("a failed fence write leaves no scratch file in the workspace", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-fence-tmp-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const { WORKSPACE_FENCE_NAME } = await import("../src/store.js");
+  const { mkdir, readdir } = await import("node:fs/promises");
+  const store = new TaskStore(path.join(workspace, ".state"));
+  await store.init();
+  await mkdir(path.join(workspace, WORKSPACE_FENCE_NAME));
+
+  await assert.rejects(() => store.pinWorkspaceFence(workspace, { nodeId: "build" }), RunLeaseError);
+
+  const leftovers = (await readdir(workspace)).filter((name) => name.endsWith(".tmp"));
+  assert.deepEqual(leftovers, [], "the interrupted atomic write left its temp file behind");
+});
+
+test("a marker that parses but describes nothing still fences the workspace", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-fence-falsey-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const { WORKSPACE_FENCE_NAME } = await import("../src/store.js");
+  const store = new TaskStore(path.join(workspace, ".state"));
+  await store.init();
+
+  // `null` parses, and every falsey value reads as "no fence" at the call site.
+  for (const content of ["null", "false", "0", "[]", "{\"kind\":\"note\"}"]) {
+    await writeFile(path.join(workspace, WORKSPACE_FENCE_NAME), content);
+    const fence = await store.readWorkspaceFence(workspace);
+    assert.equal(fence?.kind, "containment", `${content} was read as an open workspace`);
+    assert.equal(fence.unreadable, true);
+    await assert.rejects(
+      () => store.acquireRunLease("task-20260101-00000004", "run-d", { workspace }),
+      /fenced after an unproven stop/
+    );
+  }
+});
+
+test("a workspace that is not a directory is a config error, not containment", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-office-not-a-dir-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = path.join(root, "workspace.txt");
+  await writeFile(workspace, "this is a file, not a workspace\n");
+  const store = new TaskStore(path.join(root, ".state"));
+  await store.init();
+
+  await assert.rejects(
+    () => store.acquireRunLease("task-20260101-00000005", "run-e", { workspace }),
+    (error) => {
+      assert.ok(error instanceof ConfigError, `expected a config error, got ${error.name}`);
+      assert.match(error.message, /is not a directory/);
+      return true;
+    }
   );
 });
 

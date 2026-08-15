@@ -725,10 +725,21 @@ export class TaskStore {
     held.contained = true;
     // Mutating the lease object the heartbeat captured is what keeps the marker
     // alive: refresh() rewrites `{...lease, heartbeatAt}` and would otherwise
-    // erase it on the next tick.
+    // erase it on the next tick. It also means a later heartbeat can still land
+    // a marker this call reported as unwritten — containment may end up
+    // stronger than reported, never weaker.
     Object.assign(held.lease, { contained: true, containment: fence });
-    await atomicWrite(held.path, held.lease).catch(() => {});
-    return held.path;
+    try {
+      await atomicWrite(held.path, held.lease);
+      // Containment counts only once it is on disk: an in-memory flag dies with
+      // this process, and what it leaves behind is an ordinary lock the next
+      // run would take over as soon as the heartbeat goes cold.
+      const written = JSON.parse(await readFile(held.path, "utf8"));
+      if (written.contained !== true || written.runId !== held.lease.runId) return null;
+      return held.path;
+    } catch {
+      return null;
+    }
   }
 
   async readWorkspaceFence(workspace) {
@@ -742,13 +753,53 @@ export class TaskStore {
       // means a marker may exist and cannot be read, and an unreadable fence
       // has to count as a set one.
       if (error.code === "ENOENT") return null;
+      if (error.code === "ENOTDIR") {
+        // No fence can live under a workspace that is not a directory, and
+        // calling that containment would send the operator to delete a path
+        // that cannot exist.
+        const info = await stat(canonicalWorkspace).catch(() => null);
+        if (!info?.isDirectory()) {
+          throw new ConfigError(`Workspace ${canonicalWorkspace} is not a directory`);
+        }
+      }
       return this.#unreadableFence(canonicalWorkspace, `${fencePath} could not be read (${error.code})`);
     }
+    let record;
     try {
-      return JSON.parse(raw);
+      record = JSON.parse(raw);
     } catch {
       return this.#unreadableFence(canonicalWorkspace, `${fencePath} is not a readable containment marker`);
     }
+    // Parsing is not validation: `null`, `false` and `0` all parse and all read
+    // as "no fence" at the call site. A marker that exists but does not
+    // describe containment is still a marker.
+    if (!record || typeof record !== "object" || record.kind !== "containment") {
+      return this.#unreadableFence(canonicalWorkspace, `${fencePath} is not a containment record`);
+    }
+    return record;
+  }
+
+  // A contained workspace is a persistent safety state a human has to clear,
+  // not a run in progress. listLeases() deliberately hides workspace locks, so
+  // the two markers need a surface of their own.
+  async readWorkspaceContainment(workspace) {
+    const canonicalWorkspace = await realpath(workspace).catch(() => path.resolve(workspace));
+    const fence = await this.readWorkspaceFence(canonicalWorkspace);
+    if (fence) {
+      return { source: "fence", path: path.join(canonicalWorkspace, WORKSPACE_FENCE_NAME), ...fence };
+    }
+    const lockPath = path.join(canonicalWorkspace, WORKSPACE_LOCK_NAME);
+    const lock = await this.#readContainedLock(lockPath);
+    if (!lock) return null;
+    return {
+      source: "lock",
+      path: lockPath,
+      kind: "containment",
+      workspace: canonicalWorkspace,
+      taskId: lock.taskId ?? null,
+      nodeId: lock.containment?.nodeId ?? null,
+      reason: lock.containment?.reason ?? "Execution could not be proven stopped"
+    };
   }
 
   #unreadableFence(canonicalWorkspace, reason) {
@@ -959,8 +1010,15 @@ function createTaskId() {
 
 async function atomicWrite(target, lease) {
   const temporary = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-  await writeFile(temporary, JSON.stringify(lease), "utf8");
-  await rename(temporary, target);
+  try {
+    await writeFile(temporary, JSON.stringify(lease), "utf8");
+    await rename(temporary, target);
+  } catch (error) {
+    // A swap that could not complete must not leave its scratch file behind in
+    // the workspace.
+    await rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 function safeParseJson(line) {

@@ -179,6 +179,47 @@ test("an unproven Herdr stop releases the run lease but keeps a workspace fence"
   );
 });
 
+test("a failed turn that cannot be proven stopped fences the workspace before releasing", async (context) => {
+  const { config, store, orchestrator, workflowOrchestrator } = await createLifecycle(context, {
+    herdr: {
+      ensureAgent: async () => ({ agentName: "ao-test", kind: "codex" }),
+      dispatch: async (entry) => entry,
+      // Not a cancellation: the ordinary way a remote agent turn dies.
+      wait: async () => { throw new Error("remote prompt timed out"); },
+      interrupt: async () => ({ interrupted: true, settled: false }),
+      release: async () => {}
+    }
+  });
+  const task = await workflowOrchestrator.createWorkflow("Fence a failed unproven stop.", {
+    version: 1,
+    runtime: "herdr",
+    nodes: [
+      {
+        id: "build",
+        owner: "alpha",
+        access: "write",
+        workspace: "worktree",
+        writeScopes: ["src/**"]
+      },
+      { id: "gate", type: "approval", dependsOn: ["build"], prompt: "Approve." },
+      { id: "publish", type: "integration", source: "build", dependsOn: ["build", "gate"] }
+    ]
+  });
+
+  const finished = await orchestrator.runTask(task.id);
+
+  assert.equal(finished.status, "failed");
+  assert.equal(await store.readLease(task.id), null);
+  assert.equal((await store.readWorkspaceFence(config.workspace)).kind, "containment");
+  const other = await store.createTask("Must not share the fenced workspace.", [
+    { id: "alpha", adapter: "mock", role: "Alpha." }
+  ]);
+  await assert.rejects(
+    () => orchestrator.runTask(other.id),
+    RunLeaseError
+  );
+});
+
 test("an unproven stop whose fence cannot be written keeps the workspace lock", async (context) => {
   let waitStarted;
   const waitStartedPromise = new Promise((resolve) => { waitStarted = resolve; });

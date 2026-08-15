@@ -295,6 +295,11 @@ export class DashboardServer {
     const staleRunTaskIds = tasks
       .filter((task) => task.status === "running" && !activeRuns[task.id])
       .map((task) => task.id);
+    // A contained workspace is not a run and never appears in the lease
+    // listing, yet nothing may execute until an operator clears it. A workspace
+    // that is not a directory is a config error, not containment, and must not
+    // take health down with it.
+    const containment = await this.store.readWorkspaceContainment(this.config.workspace).catch(() => null);
     return {
       status: "ok",
       serverTime: new Date().toISOString(),
@@ -309,6 +314,7 @@ export class DashboardServer {
       runningTaskIds: [...this.runningTasks.keys()],
       activeRuns,
       staleRunTaskIds,
+      containment,
       metrics: {
         totalTasks: tasks.length,
         activeTasks: tasks.filter((task) => ["ready", "running"].includes(task.status)).length,

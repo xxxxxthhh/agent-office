@@ -4,13 +4,13 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { request as httpRequest } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { normalizeConfig } from "../src/config.js";
 import { Orchestrator } from "../src/orchestrator.js";
 import { loadTurnSchema } from "../src/protocol.js";
 import { DEFAULT_SCHEMA_PATH } from "../src/runtime.js";
 import { DashboardServer } from "../src/server.js";
-import { TaskStore } from "../src/store.js";
+import { TaskStore, WORKSPACE_LOCK_NAME } from "../src/store.js";
 import { WorkflowOrchestrator } from "../src/workflow-orchestrator.js";
 
 async function createTestServer(context, options = {}) {
@@ -96,6 +96,33 @@ test("serves the dashboard and a bounded operational health snapshot", async (co
   const capabilities = await (await fetch(`${server.url}/api/capabilities`)).json();
   assert.equal(capabilities.agents[0].id, "worker");
   assert.ok(capabilities.agents[0].models.length > 0);
+});
+
+test("health surfaces a contained workspace that no lease listing shows", async (context) => {
+  const { server, config, store } = await createTestServer(context);
+
+  // A contained lock is a workspace lease, and listLeases() hides those to keep
+  // from double-counting the task lease it mirrors. Here it mirrors nothing: it
+  // is a persistent safety state only an operator can clear.
+  await writeFile(path.join(config.workspace, WORKSPACE_LOCK_NAME), JSON.stringify({
+    taskId: "task-20260101-00000001", runId: "unproven-stop", kind: "workspace",
+    workspace: config.workspace, pid: process.pid, host: os.hostname(),
+    startedAt: "2020-01-01T00:00:00.000Z", heartbeatAt: "2020-01-01T00:00:00.000Z",
+    contained: true,
+    containment: { nodeId: "build", reason: "Execution could not be proven stopped after failure" }
+  }));
+
+  const contained = await (await fetch(`${server.url}/api/health`)).json();
+  assert.equal(contained.containment.source, "lock");
+  assert.equal(contained.containment.nodeId, "build");
+  assert.match(contained.containment.reason, /could not be proven stopped/);
+  assert.ok(contained.containment.path.endsWith(WORKSPACE_LOCK_NAME));
+
+  await rm(path.join(config.workspace, WORKSPACE_LOCK_NAME));
+  await store.pinWorkspaceFence(config.workspace, { nodeId: "build" });
+  const fenced = await (await fetch(`${server.url}/api/health`)).json();
+  assert.equal(fenced.containment.source, "fence");
+  assert.equal(fenced.containment.nodeId, "build");
 });
 
 test("creates, monitors, runs, and resumes a task through the HTTP API", async (context) => {

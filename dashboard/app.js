@@ -73,6 +73,8 @@ const elements = {
   runtimeRunning: document.querySelector("#runtime-running"),
   runtimeWorkspace: document.querySelector("#runtime-workspace"),
   runtimeState: document.querySelector("#runtime-state"),
+  runtimeContainmentRow: document.querySelector("#runtime-containment-row"),
+  runtimeContainment: document.querySelector("#runtime-containment"),
   capabilitySummary: document.querySelector("#capability-summary"),
   capabilityList: document.querySelector("#capability-list"),
   capabilityRefresh: document.querySelector("#capability-refresh"),
@@ -751,6 +753,14 @@ function renderRuntime() {
   elements.runtimeWorkspace.title = health.workspace;
   elements.runtimeState.textContent = health.stateDir;
   elements.runtimeState.title = health.stateDir;
+  // Nothing can run in a contained workspace until someone deletes the marker,
+  // so the path to delete is the useful thing to show.
+  const containment = health.containment ?? null;
+  elements.runtimeContainmentRow.hidden = !containment;
+  if (containment) {
+    elements.runtimeContainment.textContent = `${containment.reason} — 删除 ${containment.path}`;
+    elements.runtimeContainment.title = containment.path;
+  }
 }
 
 function renderCapabilities() {
