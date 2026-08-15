@@ -342,13 +342,22 @@ export class WorkflowOrchestrator {
           true
         );
         await this.#failNode(taskId, nodeId, attemptToken, failure.error, leaseId, failure.violation);
-        await this.store.pinWorkspaceFence(this.config.workspace, {
-          taskId,
-          nodeId,
-          reason: failure.violation?.reason ?? "Execution could not be proven stopped after cancellation"
-        }).catch(() => {});
+        let fenceError = null;
+        try {
+          await this.store.pinWorkspaceFence(this.config.workspace, {
+            taskId,
+            nodeId,
+            reason: failure.violation?.reason ?? "Execution could not be proven stopped after cancellation"
+          });
+        } catch (error) {
+          // The store has already escalated onto the workspace lock; what is
+          // left here is to never report this as a clean stop.
+          fenceError = error;
+        }
         onEvent({ type: "workflow.node_failed", taskId, nodeId, error: failure.error.message });
-        const unproven = new ConfigError(failure.error.message);
+        const unproven = new ConfigError(
+          fenceError ? `${failure.error.message}; ${fenceError.message}` : failure.error.message
+        );
         unproven.unprovenStop = true;
         throw unproven;
       }

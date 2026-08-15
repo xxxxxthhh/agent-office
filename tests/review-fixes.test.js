@@ -662,6 +662,84 @@ test("a committed rename keeps the old path in the list and patch", async (conte
   assert.ok(diff.patch.includes("before-name.txt"), "the old path vanished from the patch");
 });
 
+// --- Round 6: a fence that fails to persist must not fail open ---------------
+
+test("a contained workspace lock is not taken over once its holder is gone", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-contained-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const { WORKSPACE_LOCK_NAME } = await import("../src/store.js");
+  const { spawnSync } = await import("node:child_process");
+  // A PID that has certainly exited, and a heartbeat from 2020: containment has
+  // to hold precisely in the state where a stale lock would be taken over.
+  const deadPid = spawnSync(process.execPath, ["-e", ""]).pid;
+  await writeFile(path.join(workspace, WORKSPACE_LOCK_NAME), JSON.stringify({
+    taskId: "task-20260101-00000001", runId: "unproven-stop", kind: "workspace",
+    workspace, pid: deadPid, host: os.hostname(),
+    startedAt: "2020-01-01T00:00:00.000Z", heartbeatAt: "2020-01-01T00:00:00.000Z",
+    contained: true
+  }));
+  const store = new TaskStore(path.join(workspace, ".state"), { staleLeaseMs: 50, lockTimeoutMs: 300 });
+  await store.init();
+
+  await assert.rejects(
+    () => store.acquireRunLease("task-20260101-00000002", "run-b", { workspace }),
+    /fenced after an unproven stop/
+  );
+  // The takeover path replaces the stale file in place; it must not have
+  // overwritten the marker on its way to that rejection.
+  const after = JSON.parse(await readFile(path.join(workspace, WORKSPACE_LOCK_NAME), "utf8"));
+  assert.equal(after.contained, true);
+  assert.equal(after.runId, "unproven-stop");
+});
+
+test("a fence that cannot be written keeps the workspace lock instead of releasing it", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-fence-write-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const { WORKSPACE_FENCE_NAME, WORKSPACE_LOCK_NAME } = await import("../src/store.js");
+  const { mkdir } = await import("node:fs/promises");
+  const store = new TaskStore(path.join(workspace, ".state"));
+  await store.init();
+  const lease = await store.acquireRunLease("task-20260101-00000001", "unproven-stop", { workspace });
+  // Something occupies the fence path by the time the run has to fence itself,
+  // so the atomic rename fails.
+  await mkdir(path.join(workspace, WORKSPACE_FENCE_NAME));
+
+  await assert.rejects(
+    () => store.pinWorkspaceFence(workspace, { taskId: "task-20260101-00000001", nodeId: "build" }),
+    /is being kept as the containment marker/
+  );
+  await lease.release();
+
+  assert.ok(
+    existsSync(path.join(workspace, WORKSPACE_LOCK_NAME)),
+    "the release freed the workspace although the fence never persisted"
+  );
+  // Clear what made the write fail: the converted lock alone has to keep the
+  // workspace closed.
+  await rm(path.join(workspace, WORKSPACE_FENCE_NAME), { recursive: true, force: true });
+  await assert.rejects(
+    () => store.acquireRunLease("task-20260101-00000002", "run-b", { workspace }),
+    /fenced after an unproven stop/
+  );
+});
+
+test("an unreadable fence marker counts as a fence, not as an open workspace", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-fence-torn-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const { WORKSPACE_FENCE_NAME } = await import("../src/store.js");
+  const store = new TaskStore(path.join(workspace, ".state"));
+  await store.init();
+  await writeFile(path.join(workspace, WORKSPACE_FENCE_NAME), "{ \"kind\": \"contain");
+
+  const fence = await store.readWorkspaceFence(workspace);
+  assert.equal(fence.kind, "containment");
+  assert.equal(fence.unreadable, true);
+  await assert.rejects(
+    () => store.acquireRunLease("task-20260101-00000003", "run-c", { workspace }),
+    /fenced after an unproven stop/
+  );
+});
+
 test("heartbeat temp files of the workspace lock never enter the diff", async (context) => {
   const { workspace } = await gitWorkspace(context);
   const { WORKSPACE_LOCK_NAME } = await import("../src/store.js");
