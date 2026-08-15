@@ -647,7 +647,8 @@ export class TaskStore {
         throw new RunLeaseError(
           `Workspace ${canonicalWorkspace} is already in use by task ${existing.taskId} `
           + `(pid ${existing.pid} on ${existing.host}, started ${existing.startedAt}). `
-          + "Agents run one at a time per workspace; stop that run first.",
+          + `Agents run one at a time per workspace; stop that run first, or delete ${lockPath} `
+          + "once you have confirmed it is gone.",
           existing
         );
       }
@@ -685,7 +686,8 @@ export class TaskStore {
           throw new RunLeaseError(
             `Workspace ${canonicalWorkspace} is already in use by task ${current.taskId} `
             + `(pid ${current.pid} on ${current.host}, started ${current.startedAt}). `
-            + "Agents run one at a time per workspace; stop that run first.",
+            + `Agents run one at a time per workspace; stop that run first, or delete ${lockPath} `
+            + "once you have confirmed it is gone.",
             current
           );
         }

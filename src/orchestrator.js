@@ -247,7 +247,10 @@ export class Orchestrator {
         if (task.status !== "running") break;
       }
 
-      if (cancelled) break;
+      // An unproven stop leaves the round unfinished: recording and announcing
+      // it first would put another observer call between here and the fencing
+      // below, and one that throws would release the workspace.
+      if (cancelled || unproven) break;
 
       await this.store.updateTask(taskId, "round.completed", (current) => {
         current.roundsCompleted += 1;

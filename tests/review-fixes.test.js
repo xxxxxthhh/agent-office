@@ -947,9 +947,11 @@ test("a serial run whose process tree survives SIGKILL fences the workspace", as
   const task = await orchestrator.createTask("a turn whose tree cannot be killed");
 
   const finished = await orchestrator.runTask(task.id, {
-    // An observer that raises must not be able to skip the fencing.
+    // No observer call between the unproven stop and the fencing may skip it.
     onEvent: (event) => {
-      if (event.type === "turn.failed") throw new Error("observer exploded");
+      if (event.type === "turn.failed" || event.type === "round.completed") {
+        throw new Error("observer exploded");
+      }
     }
   });
 
