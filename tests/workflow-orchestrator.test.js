@@ -981,6 +981,100 @@ test("publishes the rework, not the commit prepared before the writer was reopen
   );
 });
 
+test("refuses to re-prepare from a commit that replaced the prepared one", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-office-publication-spoof-"));
+  context.after(async () => {
+    await rm(root, { recursive: true, force: true });
+    await rm(`${root}-state`, { recursive: true, force: true });
+  });
+  await runProcess({ command: "git", args: ["init"], cwd: root });
+  await runProcess({ command: "git", args: ["config", "user.email", "test@example.com"], cwd: root });
+  await runProcess({ command: "git", args: ["config", "user.name", "Test"], cwd: root });
+  await mkdir(path.join(root, "src"));
+  await writeFile(path.join(root, "src", "seed.js"), "export const seed = true;\n");
+  await runProcess({ command: "git", args: ["add", "."], cwd: root });
+  await runProcess({ command: "git", args: ["commit", "-m", "initial"], cwd: root });
+  const baseHead = (await runProcess({ command: "git", args: ["rev-parse", "HEAD"], cwd: root })).stdout.trim();
+  const config = normalizeConfig({
+    version: 1,
+    workspace: root,
+    stateDir: `${root}-state`,
+    agents: [{ id: "alpha", adapter: "mock", role: "Build." }]
+  }, root);
+  const store = new TaskStore(config.stateDir);
+  const schema = await loadTurnSchema(SCHEMA_PATH);
+  let attempt = 0;
+  let worktree = null;
+  const runtime = {
+    ensureAgent: async () => null,
+    dispatch: async (entry) => entry,
+    wait: async (handle) => {
+      attempt += 1;
+      worktree = handle.workspace;
+      await writeFile(path.join(handle.workspace, "src", "answer.js"), `export const answer = ${attempt};\n`);
+      return {
+        response: { summary: "built", status: "done", messages: [], artifacts: [], needsUser: false },
+        tracePath: null
+      };
+    },
+    release: async () => {}
+  };
+  const orchestrator = new WorkflowOrchestrator({
+    config,
+    store,
+    schema,
+    schemaPath: SCHEMA_PATH,
+    runtimeOverrides: { process: runtime }
+  });
+  const task = await orchestrator.createWorkflow("Refuse a substituted commit.", {
+    version: 1,
+    nodes: [
+      {
+        id: "build",
+        owner: "alpha",
+        access: "write",
+        workspace: "worktree",
+        writeScopes: ["src/**"]
+      },
+      { id: "gate", type: "approval", dependsOn: ["build"], prompt: "Approve." },
+      { id: "publish", type: "integration", source: "build", dependsOn: ["build", "gate"] }
+    ]
+  });
+  await orchestrator.runWorkflow(task.id);
+  await store.approveWorkflowNode(task.id, "gate");
+  await writeFile(path.join(root, "untracked.txt"), "dirty\n");
+  await orchestrator.runWorkflow(task.id);
+  await rm(path.join(root, "untracked.txt"));
+  await store.retryWorkflowNode(task.id, "build");
+
+  // Between the reopening and the writer's next run, the prepared commit is
+  // replaced by one carrying the same subject and an extra file. Everything
+  // downstream would then treat that file as part of the writer's own work:
+  // it lands in the reopened writer's baseline and verified snapshot, and it
+  // sits inside the node's write scopes.
+  await runProcess({ command: "git", args: ["reset", "--hard", baseHead], cwd: worktree });
+  await writeFile(path.join(worktree, "src", "spoof.js"), "export const spoof = true;\n");
+  await runProcess({ command: "git", args: ["add", "."], cwd: worktree });
+  await runProcess({
+    command: "git",
+    args: ["commit", "-m", `agent-office: ${task.id} build`],
+    cwd: worktree
+  });
+
+  await orchestrator.runWorkflow(task.id);
+  await store.approveWorkflowNode(task.id, "gate");
+  const finished = await orchestrator.runWorkflow(task.id);
+
+  assert.equal(finished.status, "failed");
+  assert.match(finished.workflow.nodes.publish.error, /is not the commit Agent Office prepared/);
+  await assert.rejects(() => readFile(path.join(root, "src", "spoof.js")), /ENOENT/);
+  assert.equal(
+    (await runProcess({ command: "git", args: ["rev-list", "--count", `${baseHead}..HEAD`], cwd: root })).stdout.trim(),
+    "0",
+    "a substituted commit reached the integration target"
+  );
+});
+
 test("publishes deletions without treating deleted paths as artifacts", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-office-delete-publication-"));
   context.after(async () => {

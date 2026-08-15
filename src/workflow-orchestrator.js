@@ -244,6 +244,8 @@ export class WorkflowOrchestrator {
             const currentNode = current.workflow.nodes[nodeId];
             this.#assertAttempt(currentNode, node.attemptToken);
             currentNode.publicationIntent = intent;
+            // The new intent supersedes the commit a reopened writer invalidated.
+            currentNode.invalidatedPreparedHead = null;
           }, { nodeId, sourceHead: intent.sourceHead, changedFiles: intent.changedFiles });
         }
         const publication = await this.workspaceManager.publishIntegration(intent);

@@ -309,6 +309,13 @@ export class TaskStore {
         // afterwards would ship the work the reviewer sent back. Retrying the
         // integration node alone still keeps its own intent, which is what
         // stops a retry from committing the same work twice.
+        //
+        // The commit's id outlives the intent: re-preparing has to find that
+        // exact commit at the worktree head, so a commit made by anything else
+        // — an agent copying the expected subject, say — cannot take its place.
+        if (descendant.publicationIntent?.sourceHead) {
+          descendant.invalidatedPreparedHead = descendant.publicationIntent.sourceHead;
+        }
         descendant.publicationIntent = null;
       }
       task.status = "ready";

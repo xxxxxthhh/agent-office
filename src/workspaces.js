@@ -223,6 +223,16 @@ export class WorkspaceManager {
       if (count.stdout.trim() !== "1" || message.stdout.trim() !== expectedMessage) {
         throw new ConfigError("Writing agents may not create commits; only an Agent Office prepared commit can resume");
       }
+      // The subject alone proves nothing — anything with write access to the
+      // worktree can copy it. Whenever a previous prepare is on record, the
+      // commit must be that exact one; the subject check only stands in for a
+      // prepare whose intent never got persisted.
+      if (node.invalidatedPreparedHead && sourceHead !== node.invalidatedPreparedHead) {
+        throw new ConfigError(
+          `Integration source head ${sourceHead} is not the commit Agent Office prepared `
+          + `(${node.invalidatedPreparedHead}); refusing to publish it`
+        );
+      }
       if (dirtyFiles.length) {
         // The writer was reopened and ran again on top of a commit prepared for
         // its previous attempt. That commit is Agent Office's own — the checks
