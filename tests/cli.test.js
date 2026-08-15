@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { runProcess } from "../src/adapters/process.js";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -421,4 +421,28 @@ test("workflow create refuses an ambiguous definition source", async (context) =
       return true;
     }
   );
+});
+
+test("generated state never lands inside the workspace, whatever XDG_STATE_HOME says", async (context) => {
+  const { starterStateDir } = await import("../src/config.js");
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-xdg-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const previous = process.env.XDG_STATE_HOME;
+  context.after(() => {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previous;
+  });
+
+  // The workspace itself, a directory inside it, and a symlink that resolves
+  // into it all describe the same unusable placement.
+  const link = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-office-link-")), "state");
+  await symlink(workspace, link);
+  for (const candidate of [workspace, path.join(workspace, ".state"), link]) {
+    process.env.XDG_STATE_HOME = candidate;
+    const stateDir = starterStateDir(workspace);
+    assert.ok(
+      path.relative(workspace, stateDir).startsWith(".."),
+      `state landed inside the workspace for XDG_STATE_HOME=${candidate}: ${stateDir}`
+    );
+  }
 });

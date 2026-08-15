@@ -16,6 +16,25 @@ function defaultRealpathSync(target) {
   }
 }
 
+// A state directory usually does not exist yet, and realpath cannot resolve a
+// path that is not there. Canonicalizing the nearest existing ancestor is what
+// makes the comparison see through symlinks and through /tmp vs /private/tmp.
+function canonicalize(target, resolveReal) {
+  const resolved = path.resolve(target);
+  const missing = [];
+  let current = resolved;
+  for (;;) {
+    const real = resolveReal(current);
+    if (real !== current || current === path.dirname(current)) {
+      return path.join(real, ...missing.reverse());
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return path.join(real, ...missing.reverse());
+    missing.push(path.basename(current));
+    current = parent;
+  }
+}
+
 // Workflows refuse to run while control state sits where an executing agent
 // could rewrite it, so a generated config keeps state outside the workspace
 // entirely. The digest keeps two projects with the same directory name apart.
@@ -28,9 +47,12 @@ export function starterStateDir(workspace, { realpathSync = defaultRealpathSync 
   const home = path.join(os.homedir(), ".local", "state");
   const configured = process.env.XDG_STATE_HOME ? path.resolve(process.env.XDG_STATE_HOME) : null;
   // An XDG_STATE_HOME pointing inside the workspace would generate exactly the
-  // configuration workflows reject, so it is not honoured for this.
-  if (configured && !isInside(canonical, configured)) return path.join(configured, leaf);
-  if (!isInside(canonical, home)) return path.join(home, leaf);
+  // configuration workflows reject, so it is not honoured for this. Candidates
+  // are canonicalized first: a lexical comparison misses a symlink into the
+  // workspace, and on macOS /tmp against /private/tmp.
+  const contains = (candidate) => isInside(canonical, canonicalize(candidate, realpathSync));
+  if (configured && !contains(configured)) return path.join(configured, leaf);
+  if (!contains(home)) return path.join(home, leaf);
   throw new ConfigError(
     `Cannot place control state outside ${canonical}: both the home state directory and `
     + "XDG_STATE_HOME resolve inside it. Set stateDir to an absolute path outside the workspace."
@@ -39,7 +61,9 @@ export function starterStateDir(workspace, { realpathSync = defaultRealpathSync 
 
 function isInside(parent, target) {
   const relative = path.relative(parent, target);
-  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+  // The workspace itself counts as inside: state written directly into it is
+  // exactly what a writing agent can reach.
+  return !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 export const STARTER_AGENTS = {

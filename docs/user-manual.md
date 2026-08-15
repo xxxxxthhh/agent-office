@@ -415,7 +415,7 @@ agent-office --version
 
 **`--version`** — 输出包版本。
 
-**`workflow create --objective "..." --file workflow.json`** — 从 JSON definition 创建 `mode: "workflow"` 任务。控制状态必须在 executor workspace 之外（把 `stateDir` 设成绝对路径）。当前没有 HTTP 上传 definition 的接口。
+**`workflow create --objective "..." (--example NAME | --file workflow.json) [--owner agent-id]`** — 从 JSON definition 创建 `mode: "workflow"` 任务。`--example` 用随包发布的 definition（`process-review`、`herdr-feature`），`--owner` 把其中所有 `agent` 节点改派给同一个代理，适合只装了一个代理 CLI 的机器。控制状态必须在 executor workspace 之外（把 `stateDir` 设成绝对路径）。当前没有 HTTP 上传 definition 的接口。
 
 **`workflow approve <task-id> <node-id>`** / **`workflow retry <task-id> <node-id>`** — 批准 gate，或把失败/受阻/可返工节点重新标为可调度。它们不立刻执行节点，之后仍要 `run`。
 
