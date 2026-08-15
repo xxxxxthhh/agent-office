@@ -12,7 +12,7 @@ import {
   stat,
   writeFile
 } from "node:fs/promises";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { ConfigError, LockTimeoutError, RunLeaseError, TaskNotFoundError } from "./errors.js";
 import { normalizeTurnEnvelope } from "./protocol.js";
 import { assertNonEmptyString, nowIso, sleep } from "./utils.js";
@@ -34,12 +34,14 @@ export class TaskStore {
     this.runsDir = path.join(this.stateDir, "runs");
     this.leasesDir = path.join(this.stateDir, "leases");
     this.baselinesDir = path.join(this.stateDir, "baselines");
+    this.containmentsDir = path.join(this.stateDir, "containments");
     this.eventsPath = path.join(this.stateDir, "events.jsonl");
     this.lockPath = path.join(this.stateDir, ".write-lock");
     this.lockTimeoutMs = options.lockTimeoutMs ?? 5000;
     this.staleLockMs = options.staleLockMs ?? 30_000;
     this.leaseHeartbeatMs = options.leaseHeartbeatMs ?? 5_000;
     this.staleLeaseMs = options.staleLeaseMs ?? 30_000;
+    this.containmentRetryMs = options.containmentRetryMs ?? 1000;
     this.hostname = options.hostname ?? os.hostname();
     this.maxEventFileBytes = options.maxEventFileBytes ?? 5 * 1024 * 1024;
     this.maxRunFiles = options.maxRunFiles ?? 500;
@@ -463,14 +465,17 @@ export class TaskStore {
       ? await realpath(workspace).catch(() => path.resolve(workspace))
       : null;
     if (canonicalWorkspace) {
-      const fence = await this.readWorkspaceFence(canonicalWorkspace);
-      if (fence) {
+      // Any of the three markers closes the workspace, and the one that is set
+      // names the file the operator has to delete — including the digest-named
+      // state record, which nobody could guess otherwise.
+      const containment = await this.readWorkspaceContainment(canonicalWorkspace);
+      if (containment) {
         throw new RunLeaseError(
           `Workspace ${canonicalWorkspace} is fenced after an unproven stop`
-          + (fence.taskId ? ` of ${fence.taskId}` : "")
-          + (fence.nodeId ? `/${fence.nodeId}` : "")
-          + `. Confirm the agent is stopped, then delete ${path.join(canonicalWorkspace, WORKSPACE_FENCE_NAME)}.`,
-          fence
+          + (containment.taskId ? ` of ${containment.taskId}` : "")
+          + (containment.nodeId ? `/${containment.nodeId}` : "")
+          + `. Confirm the agent is stopped, then delete ${containment.path}.`,
+          containment
         );
       }
     }
@@ -502,6 +507,13 @@ export class TaskStore {
         await rm(this.#leasePath(taskId), { force: true });
         throw error;
       }
+      // Every write to the lock file goes through one chain, so a containment
+      // conversion can never interleave with a heartbeat refresh.
+      let workspaceWrites = Promise.resolve();
+      workspaceLock.serialize = (write) => {
+        workspaceWrites = workspaceWrites.then(write, write);
+        return workspaceWrites;
+      };
       this.workspaceLocks.set(canonicalWorkspace, workspaceLock);
     }
 
@@ -536,7 +548,11 @@ export class TaskStore {
     // markLost clears it on loss), so it cannot outlive the run.
     const timer = setInterval(() => {
       refresh(this.#leasePath(taskId), taskLease).catch(() => {});
-      if (workspaceLock) refresh(workspaceLock.path, workspaceLock.lease).catch(() => {});
+      // A contained lock is a permanent marker, not a lease: keeping it fresh
+      // would only give a heartbeat the chance to race the marker it carries.
+      if (workspaceLock && !workspaceLock.contained) {
+        workspaceLock.serialize(() => refresh(workspaceLock.path, workspaceLock.lease)).catch(() => {});
+      }
     }, this.leaseHeartbeatMs);
 
     return {
@@ -674,13 +690,17 @@ export class TaskStore {
     );
   }
 
-  // The fence is the only thing that keeps a workspace closed once the run
-  // lease is released, so "the marker failed to persist" must never end as a
-  // silent release. The write is read back, and a fence that cannot be proven
-  // on disk escalates onto the workspace lock this run still holds.
-  async pinWorkspaceFence(workspace, record = {}) {
+  // Containment is what keeps a workspace closed once the run lease is
+  // released, so this call may not come back until a marker is proven on disk.
+  // Three locations are tried, each read back: the fence file and the workspace
+  // lock are visible to every config pointing at this workspace; the state
+  // record only to configs sharing this stateDir, but by the time an unproven
+  // stop gets here the failed node has just been written there, so it is the
+  // location most likely to still be writable. When none of them takes, the
+  // call keeps retrying instead of returning — the lease is still held and its
+  // heartbeat still runs, and a live holder is itself containment.
+  async pinWorkspaceFence(workspace, record = {}, options = {}) {
     const canonicalWorkspace = await realpath(workspace).catch(() => path.resolve(workspace));
-    const fencePath = path.join(canonicalWorkspace, WORKSPACE_FENCE_NAME);
     const fence = {
       kind: "containment",
       workspace: canonicalWorkspace,
@@ -690,26 +710,51 @@ export class TaskStore {
       host: this.hostname,
       createdAt: nowIso()
     };
+    let attempts = 1;
+    let persisted = await this.#persistContainment(canonicalWorkspace, fence);
+    while (!persisted) {
+      // Reported before the first wait: a run that stops returning with nothing
+      // on screen is indistinguishable from a deadlock.
+      options.onBlocked?.({ workspace: canonicalWorkspace, attempts, fence });
+      await sleep(this.containmentRetryMs);
+      attempts += 1;
+      persisted = await this.#persistContainment(canonicalWorkspace, fence);
+    }
+    return { ...fence, source: persisted.source, path: persisted.path };
+  }
+
+  async #persistContainment(canonicalWorkspace, fence) {
+    const fencePath = path.join(canonicalWorkspace, WORKSPACE_FENCE_NAME);
     try {
       await atomicWrite(fencePath, fence);
       // Read the raw file, not readWorkspaceFence(): that reader reports an
       // unreadable marker AS a fence, which would turn a failed write into a
       // false confirmation.
       const written = JSON.parse(await readFile(fencePath, "utf8"));
-      if (written.kind !== "containment" || written.createdAt !== fence.createdAt) {
-        throw new Error("the marker was replaced before it could be verified");
+      if (written.kind === "containment" && written.createdAt === fence.createdAt) {
+        return { source: "fence", path: fencePath };
       }
-      return fence;
-    } catch (error) {
-      const kept = await this.#containWorkspaceLock(canonicalWorkspace, fence);
-      throw new RunLeaseError(
-        `Could not fence workspace ${canonicalWorkspace} after an unproven stop (${error.message}). `
-        + (kept
-          ? `The workspace lock at ${kept} is being kept as the containment marker; `
-            + "confirm the agent is stopped, then delete it."
-          : "The workspace is NOT contained; confirm the agent is stopped before running against it."),
-        fence
-      );
+    } catch { /* fall through to the next location */ }
+    const lockPath = await this.#containWorkspaceLock(canonicalWorkspace, fence);
+    if (lockPath) return { source: "lock", path: lockPath };
+    const statePath = await this.#recordStateContainment(canonicalWorkspace, fence);
+    if (statePath) return { source: "state", path: statePath };
+    return null;
+  }
+
+  // Outside the workspace, so it survives a workspace that has become
+  // unwritable — at the price of only being visible to configs sharing this
+  // stateDir. Last of the three for that reason.
+  async #recordStateContainment(canonicalWorkspace, fence) {
+    const statePath = this.#stateContainmentPath(canonicalWorkspace);
+    try {
+      await mkdir(this.containmentsDir, { recursive: true });
+      await atomicWrite(statePath, fence);
+      const written = JSON.parse(await readFile(statePath, "utf8"));
+      if (written.kind !== "containment" || written.createdAt !== fence.createdAt) return null;
+      return statePath;
+    } catch {
+      return null;
     }
   }
 
@@ -729,17 +774,23 @@ export class TaskStore {
     // a marker this call reported as unwritten — containment may end up
     // stronger than reported, never weaker.
     Object.assign(held.lease, { contained: true, containment: fence });
-    try {
-      await atomicWrite(held.path, held.lease);
-      // Containment counts only once it is on disk: an in-memory flag dies with
-      // this process, and what it leaves behind is an ordinary lock the next
-      // run would take over as soon as the heartbeat goes cold.
-      const written = JSON.parse(await readFile(held.path, "utf8"));
-      if (written.contained !== true || written.runId !== held.lease.runId) return null;
-      return held.path;
-    } catch {
-      return null;
-    }
+    const convert = async () => {
+      try {
+        await atomicWrite(held.path, held.lease);
+        // Containment counts only once it is on disk: an in-memory flag dies
+        // with this process, and what it leaves behind is an ordinary lock the
+        // next run would take over as soon as the heartbeat goes cold.
+        const written = JSON.parse(await readFile(held.path, "utf8"));
+        if (written.contained !== true || written.runId !== held.lease.runId) return null;
+        return held.path;
+      } catch {
+        return null;
+      }
+    };
+    // Queued behind any heartbeat write already in flight: a refresh that
+    // serialized the lease before this conversion could otherwise land its
+    // rename afterwards and drop the marker the read-back just confirmed.
+    return held.serialize ? held.serialize(convert) : convert();
   }
 
   async readWorkspaceFence(workspace) {
@@ -781,25 +832,76 @@ export class TaskStore {
 
   // A contained workspace is a persistent safety state a human has to clear,
   // not a run in progress. listLeases() deliberately hides workspace locks, so
-  // the two markers need a surface of their own.
+  // the three markers need a surface of their own.
   async readWorkspaceContainment(workspace) {
     const canonicalWorkspace = await realpath(workspace).catch(() => path.resolve(workspace));
     const fence = await this.readWorkspaceFence(canonicalWorkspace);
     if (fence) {
-      return { source: "fence", path: path.join(canonicalWorkspace, WORKSPACE_FENCE_NAME), ...fence };
+      return this.#containmentView("fence", path.join(canonicalWorkspace, WORKSPACE_FENCE_NAME), canonicalWorkspace, fence);
     }
     const lockPath = path.join(canonicalWorkspace, WORKSPACE_LOCK_NAME);
     const lock = await this.#readContainedLock(lockPath);
-    if (!lock) return null;
+    if (lock) {
+      return this.#containmentView("lock", lockPath, canonicalWorkspace, {
+        taskId: lock.taskId,
+        ...(lock.containment && typeof lock.containment === "object" ? lock.containment : {})
+      });
+    }
+    const state = await this.#readStateContainment(canonicalWorkspace);
+    if (state) {
+      return this.#containmentView("state", this.#stateContainmentPath(canonicalWorkspace), canonicalWorkspace, state);
+    }
+    return null;
+  }
+
+  // The marker is data on disk, written by whatever last held the path, so the
+  // recovery instructions built from it come from the canonical values here —
+  // never from fields the record itself carries. A marker that could name its
+  // own `path` could send an operator to delete an unrelated file.
+  #containmentView(source, markerPath, canonicalWorkspace, record) {
     return {
-      source: "lock",
-      path: lockPath,
+      source,
+      path: markerPath,
       kind: "containment",
       workspace: canonicalWorkspace,
-      taskId: lock.taskId ?? null,
-      nodeId: lock.containment?.nodeId ?? null,
-      reason: lock.containment?.reason ?? "Execution could not be proven stopped"
+      taskId: asText(record?.taskId),
+      nodeId: asText(record?.nodeId),
+      reason: asText(record?.reason) ?? "Execution could not be proven stopped",
+      unreadable: record?.unreadable === true
     };
+  }
+
+  #stateContainmentPath(canonicalWorkspace) {
+    const digest = createHash("sha256").update(canonicalWorkspace).digest("hex").slice(0, 16);
+    return path.join(this.containmentsDir, `${digest}.json`);
+  }
+
+  async #readStateContainment(canonicalWorkspace) {
+    const statePath = this.#stateContainmentPath(canonicalWorkspace);
+    let raw;
+    try {
+      raw = await readFile(statePath, "utf8");
+    } catch (error) {
+      // ENOENT is "no record"; so is ENOTDIR, which says the containments path
+      // is not a directory and therefore never held one. That is proof of
+      // absence, unlike a record file that exists and cannot be read — fencing
+      // on it would close every workspace this config can reach.
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+      return this.#unreadableFence(canonicalWorkspace, `${statePath} could not be read (${error.code})`);
+    }
+    let record;
+    try {
+      record = JSON.parse(raw);
+    } catch {
+      return this.#unreadableFence(canonicalWorkspace, `${statePath} is not a readable containment marker`);
+    }
+    if (!record || typeof record !== "object" || record.kind !== "containment") {
+      return this.#unreadableFence(canonicalWorkspace, `${statePath} is not a containment record`);
+    }
+    // The file name is a digest, so a record for a different workspace here
+    // would be a collision, not containment of this one.
+    if (record.workspace !== canonicalWorkspace) return null;
+    return record;
   }
 
   #unreadableFence(canonicalWorkspace, reason) {
@@ -1019,6 +1121,10 @@ async function atomicWrite(target, lease) {
     await rm(temporary, { force: true }).catch(() => {});
     throw error;
   }
+}
+
+function asText(value) {
+  return typeof value === "string" ? value : null;
 }
 
 function safeParseJson(line) {

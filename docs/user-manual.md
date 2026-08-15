@@ -1075,6 +1075,12 @@ Agent Office 不保存、不读取、不转发任何 Codex / Claude 凭据。认
 
 锁持有者的进程仍存活（可能被暂停或卡住）。同机存活进程不会被自动接管（见 [10.2](#102-过期租约的判定)）。确认它不会恢复后：`kill <pid>`（之后锁自动可接管），或删除 `<workspace>/.agent-office.lock`（原运行会在下个心跳周期因 fence 自行停止）。
 
+### `Workspace ... is fenced after an unproven stop`
+
+上一次运行结束时无法证明代理进程已经停止（取消或失败后 `interrupt` 没有返回"已停止"），工作区被隔离，任何新运行都会被拒绝。错误信息里直接给出**要删除的那个文件**——隔离标记按可写性依次落在三处：`<workspace>/.agent-office.fence`、被转成隔离标记的 `<workspace>/.agent-office.lock`（此时它不再随运行结束删除，也不会被过期接管）、以及工作区不可写时的 `<stateDir>/containments/<digest>.json`。控制台"运行时"面板与 `/api/health` 的 `containment` 字段也会显示同一路径。
+
+先确认那个代理确实已经停止（`ps`、Herdr 面板、`kill` 残留进程），再删除该文件。三处都无法写入时，运行不会返回：进程会持续重试并保持租约——活着的持有者本身就是隔离——磁盘恢复可写后自动落盘收尾。
+
 ### `Timed out waiting for state lock`
 
 有进程长时间持有写锁（通常是异常残留）。等待 30 秒后锁会被判定为过期并自动清理；若持续出现，检查是否有卡死的 Agent Office 进程。

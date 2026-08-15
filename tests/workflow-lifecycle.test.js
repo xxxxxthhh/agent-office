@@ -268,7 +268,9 @@ test("an unproven stop whose fence cannot be written keeps the workspace lock", 
   const finished = await running;
 
   assert.equal(finished.status, "failed");
-  assert.match(finished.failureReason, /containment marker/);
+  // The failure has to name the marker that actually took, not the fence file
+  // that never got written.
+  assert.match(finished.failureReason, new RegExp(`containment was recorded at .*${WORKSPACE_LOCK_NAME}$`));
   const lock = JSON.parse(await readFile(path.join(config.workspace, WORKSPACE_LOCK_NAME), "utf8"));
   assert.equal(lock.contained, true, "the run released the workspace although its fence never persisted");
 

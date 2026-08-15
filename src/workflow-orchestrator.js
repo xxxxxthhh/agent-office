@@ -355,12 +355,24 @@ export class WorkflowOrchestrator {
       // the turn failed: the workspace has to be closed before this run's lease
       // is released, and the run cannot continue scheduling into it.
       let fenceError = null;
+      let pinned = null;
       try {
-        await this.store.pinWorkspaceFence(this.config.workspace, {
+        pinned = await this.store.pinWorkspaceFence(this.config.workspace, {
           taskId,
           nodeId,
           reason: failure.violation?.reason
             ?? `Execution could not be proven stopped after ${cancelled ? "cancellation" : "failure"}`
+        }, {
+          // The store will not return until containment is on disk, so this is
+          // the only sign the operator gets that the run is waiting rather
+          // than hung.
+          onBlocked: (state) => onEvent({
+            type: "workflow.containment_blocked",
+            taskId,
+            nodeId,
+            workspace: state.workspace,
+            attempts: state.attempts
+          })
         });
       } catch (error) {
         // The store has already escalated onto the workspace lock; what is
@@ -368,9 +380,12 @@ export class WorkflowOrchestrator {
         fenceError = error;
       }
       onEvent({ type: "workflow.node_failed", taskId, nodeId, error: failure.error.message });
-      const unproven = new ConfigError(
-        fenceError ? `${failure.error.message}; ${fenceError.message}` : failure.error.message
-      );
+      let message = failure.error.message;
+      if (fenceError) message += `; ${fenceError.message}`;
+      else if (pinned && pinned.source !== "fence") {
+        message += `; workspace containment was recorded at ${pinned.path}`;
+      }
+      const unproven = new ConfigError(message);
       unproven.unprovenStop = true;
       throw unproven;
     } finally {
