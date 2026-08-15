@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "runtime": "process",
+  "maxConcurrency": 2,
+  "nodes": [
+    {
+      "id": "plan",
+      "type": "agent",
+      "owner": "codex",
+      "access": "read_only",
+      "prompt": "Read the objective and the repository. Produce a compact implementation plan and the acceptance criteria you would verify. Do not edit files."
+    },
+    {
+      "id": "build",
+      "type": "agent",
+      "owner": "codex",
+      "dependsOn": ["plan"],
+      "access": "write",
+      "workspace": "worktree",
+      "maxAttempts": 2,
+      "writeScopes": ["src/**", "tests/**", "README.md"],
+      "prompt": "Implement the objective in this isolated worktree. Keep the change small, stay inside the write scopes, and do not commit."
+    },
+    {
+      "id": "review",
+      "type": "agent",
+      "owner": "claude",
+      "dependsOn": ["build"],
+      "access": "read_only",
+      "workspaceFrom": "build",
+      "prompt": "Review the implementation in this worktree against the objective. Do not edit files. Report done only when no blocking finding remains."
+    },
+    {
+      "id": "gate",
+      "type": "approval",
+      "dependsOn": ["build", "review"],
+      "prompt": "Read the diff and the review before publishing the isolated branch."
+    },
+    {
+      "id": "publish",
+      "type": "integration",
+      "source": "build",
+      "dependsOn": ["build", "gate"]
+    }
+  ]
+}

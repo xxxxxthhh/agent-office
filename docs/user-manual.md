@@ -225,7 +225,7 @@ agent-office run task-20260731-1a2b3c4d
 {
   "version": 1,
   "workspace": ".",
-  "stateDir": ".agent-office",
+  "stateDir": "/Users/you/.local/state/agent-office/my-project-1a2b3c4d",
   "collaboration": {
     "maxRounds": 4,
     "transcriptMessages": 40,
@@ -277,7 +277,7 @@ agent-office run task-20260731-1a2b3c4d
 | --- | --- | --- | --- |
 | `version` | 整数 | 必填 | 目前必须是 `1`。 |
 | `workspace` | 字符串 | `"."` | 共享工作区。相对路径按配置文件所在目录解析。 |
-| `stateDir` | 字符串 | `".agent-office"` | 状态目录。相对路径按 `workspace` 解析。 |
+| `stateDir` | 字符串 | `".agent-office"`（`init` 生成的配置写工作区之外的绝对路径） | 状态目录。相对路径按 `workspace` 解析；v2 工作流要求它在工作区之外。 |
 | `collaboration` | 对象 | 见下 | 轮次、超时与提示词预算。 |
 | `routing` | 对象 | 见下 | 能力路由。 |
 | `retention` | 对象 | 见下 | 事件日志与原始输出的保留上限。 |
@@ -364,8 +364,8 @@ agent-office run task-20260731-1a2b3c4d
 ## 6. CLI 参考
 
 ```text
-agent-office init [directory]
-agent-office start
+agent-office init [directory] [--agents codex,claude]
+agent-office start [--host 127.0.0.1] [--port 4177] [--agents codex,claude]
 agent-office doctor [--config path]
 agent-office capabilities [--refresh] [--objective "..."] [--json] [--config path]
 agent-office task create --objective "..." [--config path]
@@ -380,7 +380,8 @@ agent-office workflow retry <task-id> <node-id> [--config path]
 agent-office message send <task-id> --body "..." [--to agent|team] [--config path]
 agent-office run <task-id> [--rounds N] [--config path]
 agent-office serve [--host 127.0.0.1] [--port 4177] [--open] [--config path]
-agent-office demo
+agent-office demo [--dashboard] [--host 127.0.0.1] [--port 4177]
+agent-office --version
 ```
 
 `--config` 默认为当前目录的 `agent-office.json`。
@@ -409,6 +410,10 @@ agent-office demo
 **`task delete <task-id> --yes`** — **永久删除**任务快照。没有 `--yes` 会直接报错拒绝执行。正在运行的任务无法删除（需先停止）。删除只移除 `tasks/<id>.json` 与其租约；`events.jsonl` 中的历史事件保留，并追加一条 `task.deleted`。
 
 **`message send <task-id> --body "..." [--to ...]`** — 以 `user` 身份发消息。`--to` 默认 `team`，也可以是任务名单内的代理 ID。收件人不在名单内会报错并列出可选值。
+
+**`demo [--dashboard] [--host] [--port]`** — 离线跑一遍协作闭环；加 `--dashboard` 则用随包发布的 mock 团队直接开控制台，不依赖当前目录里有没有 `examples/`。
+
+**`--version`** — 输出包版本。
 
 **`workflow create --objective "..." --file workflow.json`** — 从 JSON definition 创建 `mode: "workflow"` 任务。控制状态必须在 executor workspace 之外（把 `stateDir` 设成绝对路径）。当前没有 HTTP 上传 definition 的接口。
 
@@ -966,7 +971,7 @@ Agent Office 依次尝试：直接解析 → 提取 Markdown 代码围栏中的 
 
 ### 13.3 数据管理
 
-- 项目默认把 `.agent-office/` 加入 `.gitignore`。
+- `init` 生成的配置把状态目录放在工作区之外（`$XDG_STATE_HOME` 或 `~/.local/state/agent-office/<项目名>-<摘要>`）；若手工改回项目内的 `.agent-office/`，记得自行加进 `.gitignore`。
 - `events.jsonl` 超过 `retention.maxEventFileBytes` 会轮转为 `events.jsonl.1`，**只保留一代**；读取事件时会跨越这个边界。需要更长的历史请自行外部归档。
 - `runs/` 在每次运行结束后裁剪到 `retention.maxRunFiles` 个文件，按修改时间删除最旧的。**这会让旧回合的“查看原始输出”失效**，任务快照里的 `tracePath` 仍在但文件已不存在（界面会提示文件不可用）。
 - 归档（`task archive`）只是隐藏，删除（`task delete --yes`）才会移除快照，且不可撤销。

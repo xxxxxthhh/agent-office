@@ -1,16 +1,17 @@
 import path from "node:path";
 import os from "node:os";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile } from "node:fs/promises";
+import { access, constants, mkdir, mkdtemp, readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
-import { normalizeConfig, writeStarterConfig } from "./config.js";
+import { normalizeConfig, writeStarterConfig, STARTER_AGENTS } from "./config.js";
 import { RunLeaseError } from "./errors.js";
 import { totalUsage } from "./usage.js";
 import { TaskStore } from "./store.js";
 import { loadTurnSchema } from "./protocol.js";
 import { Orchestrator } from "./orchestrator.js";
-import { createRuntime, DEFAULT_SCHEMA_PATH } from "./runtime.js";
+import { createRuntime, DEFAULT_SCHEMA_PATH, PACKAGE_ROOT } from "./runtime.js";
 import { DashboardServer } from "./server.js";
+import { assertControlStateOutsideWorkspace } from "./workflow-orchestrator.js";
 import { exists } from "./utils.js";
 import { inheritMacSystemProxy } from "./system-proxy.js";
 
@@ -27,6 +28,11 @@ export async function runCli(argv, io = console, options = {}) {
     case "--help":
     case "-h":
       io.log(usage());
+      return 0;
+    case "--version":
+    case "-v":
+    case "version":
+      io.log(await packageVersion());
       return 0;
     case "init":
       return initCommand(args, io);
@@ -47,7 +53,7 @@ export async function runCli(argv, io = console, options = {}) {
     case "serve":
       return serveCommand(args, io, options);
     case "demo":
-      return demoCommand(io);
+      return demoCommand(args, io, options);
     default:
       throw new Error(`Unknown command: ${command}\n\n${usage()}`);
   }
@@ -63,6 +69,8 @@ async function prepareNetworkEnvironment(io, options) {
 }
 
 async function startCommand(args, io, options) {
+  const host = takeOption(args, "--host");
+  const port = takeOption(args, "--port");
   rejectExtraArgs(args);
   const workspace = path.resolve(options.cwd ?? process.cwd());
   const configPath = path.join(workspace, "agent-office.json");
@@ -78,8 +86,9 @@ async function startCommand(args, io, options) {
       io.log("Initialization cancelled; no files were changed.");
       return 0;
     }
-    const createdPath = await writeStarterConfig(workspace);
-    io.log(`Created ${createdPath}`);
+    const { agents } = await resolveStarterAgents(takeOption(args, "--agents"));
+    const createdPath = await writeStarterConfig(workspace, { agents });
+    io.log(`Created ${createdPath} with agents: ${agents.join(", ")}`);
   }
 
   io.log("Checking the configured agents…");
@@ -93,11 +102,20 @@ async function startCommand(args, io, options) {
   io.log("Starting Agent Office and opening the dashboard…");
   const serve = options.serve
     ?? ((value, settings) => serveCommand(
-      ["--config", value, ...(settings.open ? ["--open"] : [])],
+      [
+        "--config", value,
+        ...(settings.open ? ["--open"] : []),
+        ...(settings.host ? ["--host", settings.host] : []),
+        ...(settings.port ? ["--port", settings.port] : [])
+      ],
       io,
       options
     ));
-  return serve(configPath, { open: true });
+  return serve(configPath, {
+    open: true,
+    ...(host ? { host } : {}),
+    ...(port ? { port } : {})
+  });
 }
 
 async function confirmInitialization(workspace) {
@@ -119,12 +137,52 @@ async function confirmInitialization(workspace) {
 }
 
 async function initCommand(args, io) {
+  const requested = takeOption(args, "--agents");
   const targetDirectory = path.resolve(args[0] ?? ".");
+  rejectExtraArgs(args.slice(1));
   await mkdir(targetDirectory, { recursive: true });
-  const targetPath = await writeStarterConfig(targetDirectory);
+  const { agents, detected } = await resolveStarterAgents(requested);
+  const targetPath = await writeStarterConfig(targetDirectory, { agents });
   io.log(`Created ${targetPath}`);
+  io.log(`Agents: ${agents.join(", ")}`);
+  if (!detected) {
+    io.log(
+      "Neither the Codex nor the Claude Code CLI was found on PATH, so both are written as a template. "
+      + "Install one, or edit agents[] before running a task."
+    );
+  }
   io.log("Next: agent-office doctor");
   return 0;
+}
+
+// Writing agents a machine cannot run makes `doctor` fail and `start` refuse to
+// come up, which is the whole one-command path gone for anyone who has only one
+// of the two CLIs. Both are still written when neither is installed, because
+// then the file is a template rather than a description of this machine.
+async function resolveStarterAgents(requested) {
+  if (requested) {
+    const agents = requested.split(",").map((value) => value.trim()).filter(Boolean);
+    if (!agents.length) throw new Error("--agents requires at least one agent id");
+    return { agents, detected: true };
+  }
+  const found = [];
+  for (const id of Object.keys(STARTER_AGENTS)) {
+    if (await commandOnPath(id)) found.push(id);
+  }
+  return found.length
+    ? { agents: found, detected: true }
+    : { agents: Object.keys(STARTER_AGENTS), detected: false };
+}
+
+async function commandOnPath(command) {
+  const entries = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  for (const entry of entries) {
+    try {
+      await access(path.join(entry, command), constants.X_OK);
+      return true;
+    } catch { /* keep looking */ }
+  }
+  return false;
 }
 
 async function doctorCommand(args, io) {
@@ -156,6 +214,15 @@ async function doctorCommand(args, io) {
       + `${row.tools.filter((tool) => tool.available).map((tool) => tool.label).join(", ") || "none"}`
     );
     for (const warning of row.warnings) io.log(`  ! ${warning}`);
+  }
+  // Serial tasks run happily with control state inside the workspace; every
+  // workflow command refuses it. Saying so here beats letting the first
+  // `workflow create` be the thing that reports it.
+  try {
+    await assertControlStateOutsideWorkspace(runtime.config);
+    io.log("✓ workflows: control state is outside the workspace");
+  } catch (error) {
+    io.log(`! workflows unavailable: ${error.message}`);
   }
   return rows.every((row) => row.available) ? 0 : 1;
 }
@@ -378,7 +445,20 @@ async function runTaskCommand(args, io) {
   }
   io.log(`Task ${task.id}: ${task.status}${interrupted ? " (cancelled)" : ""}`);
   if (interrupted) return 130;
-  return task.status === "failed" ? 1 : 0;
+  if (task.status === "failed") {
+    // A failed task short-circuits on a plain rerun, so saying only "failed"
+    // leaves the next step to guesswork.
+    if (task.failureReason) io.error(task.failureReason);
+    io.error(
+      task.mode === "workflow"
+        ? `Rerunning alone will not retry it. Reopen the failed node first: `
+          + `agent-office workflow retry ${task.id} <node-id>`
+        : `Rerunning alone will not retry it. Send the agent a decision first: `
+          + `agent-office message send ${task.id} --body "..."`
+    );
+    return 1;
+  }
+  return 0;
 }
 
 async function serveCommand(args, io, options = {}) {
@@ -434,7 +514,29 @@ async function openDashboard(url) {
   });
 }
 
-async function demoCommand(io) {
+async function packageVersion() {
+  const manifestPath = path.join(PACKAGE_ROOT, "package.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  return manifest.version;
+}
+
+async function demoCommand(args, io, options = {}) {
+  const dashboard = takeFlag(args, "--dashboard");
+  const host = takeOption(args, "--host");
+  const port = takeOption(args, "--port");
+  rejectExtraArgs(args);
+  if (dashboard) {
+    // The packaged example is the only zero-cost dashboard config a globally
+    // installed CLI can reach: a relative path only resolves inside a clone.
+    const configPath = path.join(PACKAGE_ROOT, "examples", "team.dashboard-demo.json");
+    io.log(`Serving the offline demo team from ${configPath}`);
+    return serveCommand([
+      "--config", configPath,
+      "--open",
+      ...(host ? ["--host", host] : []),
+      ...(port ? ["--port", port] : [])
+    ], io, options);
+  }
   const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-demo-"));
   const config = normalizeConfig(
     {
@@ -647,8 +749,8 @@ function usage() {
   return `Agent Office — local-first multi-agent orchestration
 
 Usage:
-  agent-office init [directory]
-  agent-office start
+  agent-office init [directory] [--agents codex,claude]
+  agent-office start [--host 127.0.0.1] [--port 4177] [--agents codex,claude]
   agent-office doctor [--config path]
   agent-office capabilities [--refresh] [--objective "..."] [--json] [--config path]
   agent-office task create --objective "..." [--config path]
@@ -663,8 +765,11 @@ Usage:
   agent-office message send <task-id> --body "..." [--to agent|team] [--config path]
   agent-office run <task-id> [--rounds N] [--config path]
   agent-office serve [--host 127.0.0.1] [--port 4177] [--open] [--config path]
-  agent-office demo
+  agent-office demo [--dashboard] [--host 127.0.0.1] [--port 4177]
+  agent-office --version
 
-The default configuration connects Codex and Claude Code to one shared workspace.
-Run "agent-office demo" for an offline, zero-cost collaboration trace.`;
+"init" writes a config for the agent CLIs it finds on PATH, with state kept
+outside the workspace so v2 workflows can run. Run "agent-office demo" for an
+offline, zero-cost collaboration trace, or "agent-office demo --dashboard" to
+open the same team in the console.`;
 }

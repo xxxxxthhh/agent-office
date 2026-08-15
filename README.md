@@ -89,10 +89,10 @@ agent-office serve
 
 控制台默认只绑定 `127.0.0.1`，服务端拒绝跨站写请求，也不提供远程绑定选项。
 
-零成本体验控制台：
+零成本体验控制台（用随包发布的离线团队，不依赖当前目录）：
 
 ```bash
-agent-office serve --config ./examples/team.dashboard-demo.json
+agent-office demo --dashboard
 ```
 
 然后在页面里新建任务并点击“启动协作”，可以看到 mock builder/reviewer 的完整返工闭环。
@@ -268,8 +268,8 @@ cd /path/to/your-project
 ## CLI
 
 ```text
-agent-office init [directory]
-agent-office start
+agent-office init [directory] [--agents codex,claude]
+agent-office start [--host 127.0.0.1] [--port 4177] [--agents codex,claude]
 agent-office doctor [--config path]
 agent-office capabilities [--refresh] [--objective "..."] [--json] [--config path]
 agent-office task create --objective "..." [--config path]
@@ -284,7 +284,8 @@ agent-office workflow retry <task-id> <node-id> [--config path]
 agent-office message send <task-id> --body "..." [--to agent|team] [--config path]
 agent-office run <task-id> [--rounds N] [--config path]
 agent-office serve [--host 127.0.0.1] [--port 4177] [--open] [--config path]
-agent-office demo
+agent-office demo [--dashboard] [--host 127.0.0.1] [--port 4177]
+agent-office --version
 ```
 
 ## 状态与审计
@@ -300,7 +301,7 @@ agent-office demo
     └── task-....json   # 可恢复任务快照
 ```
 
-项目默认将该目录加入 `.gitignore`。如果任务状态需要跨机器共享，应由上层系统明确选择加密存储或可信数据库，不建议直接提交模型原始输出。
+`agent-office init` 生成的配置把这个目录放在工作区之外（`$XDG_STATE_HOME` 或 `~/.local/state/agent-office/<项目名>-<摘要>`）：控制状态因此不落在执行代理可写的目录里，v2 工作流也才允许运行。若你手工把 `stateDir` 指回项目内，记得自行加进 `.gitignore`。如果任务状态需要跨机器共享，应由上层系统明确选择加密存储或可信数据库，不建议直接提交模型原始输出。
 
 ## 设计边界
 

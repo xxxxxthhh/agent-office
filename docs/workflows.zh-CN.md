@@ -16,15 +16,11 @@ Agent Office v2 是控制面，Herdr 是持久运行时：
 agent-office init .
 ```
 
-`init` 为了兼容串行任务，仍会把 `stateDir` 写成项目内的 `.agent-office`。创建 v2 工作流前必须把它改成**工作区之外的绝对路径**，例如：
+`init` 生成的 `stateDir` 已经在工作区之外（`$XDG_STATE_HOME` 或 `~/.local/state/agent-office/<项目名>-<摘要>`），因此工作流开箱即可创建。`agent-office doctor` 最后一行会确认这一点。
 
-```json
-{
-  "stateDir": "/Users/you/.local/state/agent-office/my-project"
-}
-```
+v2 会拒绝把 `stateDir` 放进执行代理可写的项目目录（会解析 symlink），避免代理篡改任务、attempt token 或审批记录。如果你手工把它改回项目内（例如老配置里的 `.agent-office`），`workflow create` 会被拒绝，`doctor` 也会提示 `workflows unavailable`。
 
-v2 会拒绝把 `stateDir` 放进执行代理可写的项目目录（会解析 symlink），避免代理篡改任务、attempt token 或审批记录。按默认 `init` 配置直接 `workflow create` 会被拒绝。
+随包发布了两个 definition：`examples/workflow.process-review.json` 走本地 Process Runtime，不需要 Herdr、也不假设项目里有 `npm test`；`examples/workflow.herdr-feature.json` 走 Herdr 常驻 session，并在 QA 节点里跑 `npm test`，适合 Node 项目。先跑通前者再换后者最省事。
 
 Herdr 推荐使用专用命名 session：
 

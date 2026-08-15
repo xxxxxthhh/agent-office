@@ -29,8 +29,10 @@ test("init, create, list, and show form a usable CLI workflow", async (context) 
   const configPath = path.join(workspace, "agent-office.json");
 
   const initialized = await runProcess({
+    // Pinned rather than detected: which agent CLIs exist is a property of the
+    // machine, and the rest of this test is about the task commands.
     command: process.execPath,
-    args: [CLI_PATH, "init", workspace],
+    args: [CLI_PATH, "init", workspace, "--agents", "codex,claude"],
     cwd: PACKAGE_ROOT,
     timeoutMs: 30_000
   });
@@ -202,4 +204,63 @@ test("creates, runs, approves, and shows a v2 workflow through the CLI", async (
   const task = JSON.parse(shown.stdout);
   assert.equal(task.mode, "workflow");
   assert.equal(task.workflow.nodes.gate.status, "succeeded");
+});
+
+test("the generated configuration can create a workflow without being edited", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-first-run-"));
+  const stateHome = await mkdtemp(path.join(os.tmpdir(), "agent-office-state-home-"));
+  context.after(async () => {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(stateHome, { recursive: true, force: true });
+  });
+
+  const initialized = await runProcess({
+    command: process.execPath,
+    args: [CLI_PATH, "init", workspace, "--agents", "codex,claude"],
+    cwd: PACKAGE_ROOT,
+    env: { ...process.env, XDG_STATE_HOME: stateHome },
+    timeoutMs: 30_000
+  });
+  assert.match(initialized.stdout, /Agents: codex, claude/);
+
+  const created = await runProcess({
+    command: process.execPath,
+    args: [
+      CLI_PATH, "workflow", "create",
+      "--config", path.join(workspace, "agent-office.json"),
+      "--objective", "Exercise the shipped process-runtime workflow.",
+      "--file", path.join(PACKAGE_ROOT, "examples", "workflow.process-review.json")
+    ],
+    cwd: PACKAGE_ROOT,
+    timeoutMs: 30_000
+  });
+
+  // The generated state directory used to sit inside the workspace, which every
+  // workflow command rejects: the headline v2 feature was unreachable until the
+  // user hand-edited the file init had just written.
+  assert.match(created.stdout.trim(), /^task-\d{8}-[a-f0-9]{8}$/);
+  const config = JSON.parse(await readFile(path.join(workspace, "agent-office.json"), "utf8"));
+  assert.ok(path.isAbsolute(config.stateDir), config.stateDir);
+  assert.ok(config.stateDir.startsWith(stateHome), config.stateDir);
+});
+
+test("the CLI reports its version", async () => {
+  const manifest = JSON.parse(await readFile(path.join(PACKAGE_ROOT, "package.json"), "utf8"));
+  const printed = await runProcess({
+    command: process.execPath,
+    args: [CLI_PATH, "--version"],
+    cwd: PACKAGE_ROOT,
+    timeoutMs: 30_000
+  });
+  assert.equal(printed.stdout.trim(), manifest.version);
+});
+
+test("the packaged demo dashboard config ships and loads", async () => {
+  const { loadConfig } = await import("../src/config.js");
+  // `demo --dashboard` resolves this path inside the installed package, which is
+  // the only copy a globally installed CLI can reach.
+  const configPath = path.join(PACKAGE_ROOT, "examples", "team.dashboard-demo.json");
+  const config = await loadConfig(configPath);
+  assert.ok(config.agents.length >= 1);
+  assert.ok(config.agents.every((agent) => agent.adapter === "mock"), "the demo must not call a real provider");
 });

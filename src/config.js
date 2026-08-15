@@ -1,9 +1,45 @@
+import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { ConfigError } from "./errors.js";
 import { assertNonEmptyString, exists, resolveFrom } from "./utils.js";
 
 export const DEFAULT_CONFIG_NAME = "agent-office.json";
+
+// Workflows refuse to run while control state sits where an executing agent
+// could rewrite it, so a generated config keeps state outside the workspace
+// entirely. The digest keeps two projects with the same directory name apart.
+export function starterStateDir(workspace) {
+  const canonical = path.resolve(workspace);
+  const base = process.env.XDG_STATE_HOME
+    ? path.resolve(process.env.XDG_STATE_HOME)
+    : path.join(os.homedir(), ".local", "state");
+  const digest = createHash("sha256").update(canonical).digest("hex").slice(0, 8);
+  return path.join(base, "agent-office", `${path.basename(canonical) || "workspace"}-${digest}`);
+}
+
+export const STARTER_AGENTS = {
+  codex: {
+    id: "codex",
+    adapter: "codex",
+    role: "Primary implementer. Make small, verified changes and report concrete evidence.",
+    sandbox: "workspace-write",
+    ephemeral: true,
+    herdrArgs: [
+      "--sandbox", "workspace-write",
+      "--ask-for-approval", "never"
+    ]
+  },
+  claude: {
+    id: "claude",
+    adapter: "claude",
+    role: "Peer reviewer and collaborator. Inspect current work, fix valid issues, and communicate actionable findings.",
+    permissionMode: "acceptEdits",
+    noSessionPersistence: true,
+    herdrArgs: ["--permission-mode", "acceptEdits"]
+  }
+};
 
 export async function loadConfig(configPath = DEFAULT_CONFIG_NAME) {
   const absolutePath = path.resolve(configPath);
@@ -182,17 +218,21 @@ export function normalizeConfig(raw, baseDir, configPath = null) {
   };
 }
 
-export async function writeStarterConfig(targetDirectory) {
+export async function writeStarterConfig(targetDirectory, { agents } = {}) {
   const directory = path.resolve(targetDirectory);
   const targetPath = path.join(directory, DEFAULT_CONFIG_NAME);
   if (await exists(targetPath)) {
     throw new ConfigError(`Refusing to overwrite existing configuration: ${targetPath}`);
   }
+  const selected = (agents ?? Object.keys(STARTER_AGENTS)).filter((id) => STARTER_AGENTS[id]);
+  if (!selected.length) {
+    throw new ConfigError(`No known agent for: ${(agents ?? []).join(", ") || "(none)"}`);
+  }
 
   const starter = {
     version: 1,
     workspace: ".",
-    stateDir: ".agent-office",
+    stateDir: starterStateDir(directory),
     collaboration: {
       maxRounds: 4,
       transcriptMessages: 40,
@@ -219,27 +259,7 @@ export async function writeStarterConfig(targetDirectory) {
       herdrServerMode: "external",
       herdrPathPrefixes: []
     },
-    agents: [
-      {
-        id: "codex",
-        adapter: "codex",
-        role: "Primary implementer. Make small, verified changes and report concrete evidence.",
-        sandbox: "workspace-write",
-        ephemeral: true,
-        herdrArgs: [
-          "--sandbox", "workspace-write",
-          "--ask-for-approval", "never"
-        ]
-      },
-      {
-        id: "claude",
-        adapter: "claude",
-        role: "Peer reviewer and collaborator. Inspect current work, fix valid issues, and communicate actionable findings.",
-        permissionMode: "acceptEdits",
-        noSessionPersistence: true,
-        herdrArgs: ["--permission-mode", "acceptEdits"]
-      }
-    ]
+    agents: selected.map((id) => STARTER_AGENTS[id])
   };
 
   await writeFile(targetPath, `${JSON.stringify(starter, null, 2)}\n`, { flag: "wx" });
