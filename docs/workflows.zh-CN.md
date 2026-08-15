@@ -117,6 +117,8 @@ Agent 节点只有同时满足以下条件才会成功：
 
 含写节点的 v1 工作流必须经过写节点之后的审批、Agent Office 准备提交和 `ff-only` 发布。建议像示例一样显式建模发布前、发布后的 shell QA；只有工作流定义中存在的节点才会成为 `completed` 的必要条件。
 
+重开已成功的 writer 会作废那次准备好的提交：下游 integration 的 intent 被清掉，同时记下那个提交的 id。重新准备时，worktree 的 HEAD 必须正是那个提交——writer 重跑产生的改动以未提交的形式叠在它上面，Agent Office 会把它重置回 base 再重新提交一次，从而发布**返工后**的内容。若 HEAD 变成了别的提交（例如有人用相同 subject 换掉了它），发布会拒绝并给出恢复命令：这是 fail-closed 的取舍，宁可停下也不发布来源不明的提交。运行被杀在"准备提交"与"记录提交"之间是唯一良性的触发场景，按错误信息里的 `git -C <worktree> reset --mixed <id>` 恢复即可。
+
 如果目标分支已经分叉，integration 会失败并保留自己准备的单一提交和已持久化的 publication intent。Agent Office 不会擅自 rebase 或覆盖用户提交。人工恢复目标分支关系后，可以对失败的 integration 执行 `workflow retry` 再次 `run`；恢复会复用精确 source HEAD，不重复提交。已经成功发布的 integration 不能重开。
 
 ## 5. 中断与恢复

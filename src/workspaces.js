@@ -228,9 +228,15 @@ export class WorkspaceManager {
       // commit must be that exact one; the subject check only stands in for a
       // prepare whose intent never got persisted.
       if (node.invalidatedPreparedHead && sourceHead !== node.invalidatedPreparedHead) {
+        // Fail closed rather than publish a commit of unknown provenance. The
+        // one benign way to land here is a crash between preparing a commit
+        // and recording it, so the message carries the exact recovery instead
+        // of leaving the operator to guess.
         throw new ConfigError(
           `Integration source head ${sourceHead} is not the commit Agent Office prepared `
-          + `(${node.invalidatedPreparedHead}); refusing to publish it`
+          + `(${node.invalidatedPreparedHead}); refusing to publish it. If a run was killed `
+          + `between preparing and recording a commit, restore it with: `
+          + `git -C ${sourceWorkspace} reset --mixed ${node.invalidatedPreparedHead}`
         );
       }
       if (dirtyFiles.length) {
