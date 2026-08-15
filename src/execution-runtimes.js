@@ -24,10 +24,16 @@ export class ProcessExecutionRuntime {
     const promise = node.type === "command"
       ? this.#runCommand(context)
       : this.#runAgent(context);
-    this.jobs.set(attemptToken, { state: "working", promise });
+    const job = { state: "working", promise, failure: null };
+    this.jobs.set(attemptToken, job);
     promise.then(
       () => this.#setJobState(attemptToken, "settled"),
-      () => this.#setJobState(attemptToken, "failed")
+      (error) => {
+        // Kept for interrupt(): the only case this runtime cannot prove a stop
+        // is a tree that outlived SIGKILL, and the error is where it says so.
+        job.failure = error;
+        this.#setJobState(attemptToken, "failed");
+      }
     );
     return { id: attemptToken, kind: "process" };
   }
@@ -42,11 +48,19 @@ export class ProcessExecutionRuntime {
     return { state: this.jobs.get(handle.id)?.state ?? "unknown" };
   }
 
-  async interrupt() {
+  async interrupt(handle) {
+    // Normally this runtime settles only once the whole process tree is gone,
+    // so a rejection already proves the stop. The exception is a tree that
+    // ignored SIGKILL: runProcess reports that as treeUnresponsive rather than
+    // hanging forever, and claiming it stopped would release the workspace to
+    // a process still able to write in it.
+    const unresponsive = this.jobs.get(handle?.id)?.failure?.details?.treeUnresponsive === true;
     return {
       interrupted: false,
-      settled: true,
-      reason: "process runtime waits for process-tree termination before rejecting"
+      settled: !unresponsive,
+      reason: unresponsive
+        ? "the process tree was still alive after SIGKILL"
+        : "process runtime waits for process-tree termination before rejecting"
     };
   }
 

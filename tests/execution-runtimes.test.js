@@ -102,6 +102,40 @@ test("targets a dedicated Herdr session and gives long node ids collision-safe b
   assert.ok(!promptCall.args.includes("blocked"), "permission prompts must not settle a workflow attempt");
 });
 
+test("the process runtime reports an unproven stop when the tree survives SIGKILL", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-unresponsive-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const store = new TaskStore(path.join(workspace, "state"));
+  await store.init();
+  const { AdapterError } = await import("../src/errors.js");
+  const runtime = new ProcessExecutionRuntime({
+    config: { workspace },
+    store,
+    // runProcess rejects with treeUnresponsive rather than hanging forever when
+    // a descendant outlives SIGKILL.
+    adapters: new Map([["alpha", {
+      runTurn: async () => {
+        throw new AdapterError("Turn timed out after 10000 ms", { treeUnresponsive: true });
+      }
+    }]])
+  });
+  const handle = await runtime.dispatch({
+    node: { id: "build", type: "agent", owner: "alpha" },
+    attemptToken: "attempt",
+    workspace,
+    timeoutMs: 10_000
+  });
+
+  await assert.rejects(() => runtime.wait(handle));
+  const containment = await runtime.interrupt(handle);
+
+  // This runtime normally settles only after the whole tree is gone, and the
+  // workflow trusts that to skip fencing. The one case where it cannot must
+  // say so, or a live tree keeps writing in a released workspace.
+  assert.equal(containment.settled, false);
+  assert.match(containment.reason, /still alive after SIGKILL/);
+});
+
 test("command workflow runtime exposes only allowlisted environment variables", async (context) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-env-runtime-"));
   context.after(() => rm(workspace, { recursive: true, force: true }));

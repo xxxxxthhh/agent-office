@@ -11,7 +11,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { runProcess } from "../src/adapters/process.js";
 import { exists, sleep } from "../src/utils.js";
 import { normalizeConfig } from "../src/config.js";
-import { ConfigError, RunLeaseError } from "../src/errors.js";
+import { AdapterError, ConfigError, RunLeaseError } from "../src/errors.js";
 import { Orchestrator } from "../src/orchestrator.js";
 import { loadTurnSchema } from "../src/protocol.js";
 import { DEFAULT_SCHEMA_PATH } from "../src/runtime.js";
@@ -787,10 +787,17 @@ test("a throwing observer cannot end the containment wait", async (context) => {
   await mkdir(path.join(workspace, WORKSPACE_FENCE_NAME));
   let calls = 0;
 
+  // Both shapes an observer can fail in: a synchronous throw, and a rejected
+  // promise from an async listener — the second would otherwise surface as an
+  // unhandled rejection and take the process (and its lease) down.
+  const observers = [
+    () => { throw new Error("observer exploded"); },
+    async () => { throw new Error("observer rejected"); }
+  ];
   const pinning = store.pinWorkspaceFence(workspace, { nodeId: "build" }, {
     onBlocked: () => {
       calls += 1;
-      throw new Error("observer exploded");
+      return observers[calls % 2]();
     }
   });
   const pending = Symbol("pending");
@@ -869,6 +876,84 @@ test("a failed fence write leaves no scratch file in the workspace", async (cont
   assert.equal(pinned.source, "lock");
   const leftovers = (await readdir(workspace)).filter((name) => name.endsWith(".tmp"));
   assert.deepEqual(leftovers, [], "the interrupted atomic write left its temp file behind");
+});
+
+// --- Round 10: findings from the Codex review of the containment fix --------
+
+test("a fence written while a run is acquiring the workspace still refuses it", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-fence-race-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const { WORKSPACE_FENCE_NAME, WORKSPACE_LOCK_NAME } = await import("../src/store.js");
+  const store = new TaskStore(path.join(workspace, ".state"));
+  await store.init();
+  await store.pinWorkspaceFence(workspace, { taskId: "task-20260101-00000001", nodeId: "build" });
+  // Stands in for the window between the two: the fencing run writes its
+  // marker and releases its lock while this acquisition is already past the
+  // containment check and on its way to creating a lock of its own.
+  const real = store.readWorkspaceContainment.bind(store);
+  let checks = 0;
+  store.readWorkspaceContainment = async (target) => (checks++ === 0 ? null : real(target));
+
+  await assert.rejects(
+    () => store.acquireRunLease("task-20260101-00000002", "run-b", { workspace }),
+    /fenced after an unproven stop while this run was acquiring it/
+  );
+
+  assert.equal(checks, 2, "the lock was taken without a second containment check");
+  assert.equal(
+    existsSync(path.join(workspace, WORKSPACE_LOCK_NAME)),
+    false,
+    "the refused run left its workspace lock behind"
+  );
+  assert.equal(await store.readLease("task-20260101-00000002"), null);
+  assert.ok(existsSync(path.join(workspace, WORKSPACE_FENCE_NAME)));
+});
+
+test("a lock that never became a marker is released once the fence persists", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-contain-clear-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const { WORKSPACE_FENCE_NAME, WORKSPACE_LOCK_NAME } = await import("../src/store.js");
+  const { realpath } = await import("node:fs/promises");
+  const store = new TaskStore(path.join(workspace, ".state"));
+  await store.init();
+  const lease = await store.acquireRunLease("task-20260101-00000001", "unproven-stop", { workspace });
+  // Stands in for a lock conversion that failed on an earlier attempt: the
+  // lock is flagged unreleasable while nothing else contains the workspace.
+  store.workspaceLocks.get(await realpath(workspace)).containing = true;
+
+  const pinned = await store.pinWorkspaceFence(workspace, { nodeId: "build" });
+  await lease.release();
+
+  assert.equal(pinned.source, "fence");
+  // The fence fences everyone. Keeping the lock too would leave a workspace
+  // that stays closed after the operator deletes the fence, blocked by a lock
+  // whose live PID makes it look held forever and which names no containment.
+  assert.equal(
+    existsSync(path.join(workspace, WORKSPACE_LOCK_NAME)),
+    false,
+    "an unmarked lock outlived the run that no longer needs it"
+  );
+  await rm(path.join(workspace, WORKSPACE_FENCE_NAME));
+  const next = await store.acquireRunLease("task-20260101-00000002", "run-b", { workspace });
+  await next.release();
+});
+
+test("a serial run whose process tree survives SIGKILL fences the workspace", async (context) => {
+  const { config, store, orchestrator } = await workspaceScaffold(context, async () => {
+    throw new AdapterError("Turn timed out after 10000 ms", { treeUnresponsive: true });
+  });
+  const task = await orchestrator.createTask("a turn whose tree cannot be killed");
+
+  const finished = await orchestrator.runTask(task.id);
+
+  // Nothing proved that tree stopped, so the workspace has to close before the
+  // run releases its lease — the serial path used to record the failure and
+  // hand the workspace to the next run.
+  assert.equal(finished.status, "failed");
+  assert.match(finished.failureReason, /containment was recorded at/);
+  assert.equal((await store.readWorkspaceFence(config.workspace)).kind, "containment");
+  const next = await orchestrator.createTask("must not enter the fenced workspace");
+  await assert.rejects(() => orchestrator.runTask(next.id), /fenced after an unproven stop/);
 });
 
 test("a marker that parses but describes nothing still fences the workspace", async (context) => {

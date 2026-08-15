@@ -507,6 +507,20 @@ export class TaskStore {
         await rm(this.#leasePath(taskId), { force: true });
         throw error;
       }
+      // Re-checked with the lock in hand: the marker may have been written
+      // between the check above and this acquisition, by a run that fenced the
+      // workspace and then released the very lock just taken.
+      const fenced = await this.readWorkspaceContainment(canonicalWorkspace);
+      if (fenced) {
+        const current = await this.#assessLease(workspaceLock.path);
+        if (!current || current.runId === runId) await rm(workspaceLock.path, { force: true });
+        await rm(this.#leasePath(taskId), { force: true });
+        throw new RunLeaseError(
+          `Workspace ${canonicalWorkspace} was fenced after an unproven stop while this run was `
+          + `acquiring it. Confirm the agent is stopped, then delete ${fenced.path}.`,
+          fenced
+        );
+      }
       // Every write to the lock file goes through one chain, so a containment
       // conversion can never interleave with a heartbeat refresh.
       let workspaceWrites = Promise.resolve();
@@ -574,9 +588,11 @@ export class TaskStore {
           // the operator may clear it.
           if (workspaceLock.contained || workspaceLock.containing) return;
           const currentWorkspace = await this.#assessLease(workspaceLock.path);
-          // Never delete a lock that a later run already took over.
+          // Never delete a lock that a later run already took over. A delete
+          // that fails leaves a lock nobody holds, which the next run takes
+          // over — releasing must not turn into the run's outcome.
           if (!currentWorkspace || currentWorkspace.runId === runId) {
-            await rm(workspaceLock.path, { force: true });
+            await rm(workspaceLock.path, { force: true }).catch(() => {});
           }
         }
       }
@@ -721,8 +737,11 @@ export class TaskStore {
     while (persisted?.source !== "fence" && persisted?.source !== "lock") {
       try {
         // Reported before the first wait: a run that stops returning with
-        // nothing on screen is indistinguishable from a deadlock.
-        options.onBlocked?.({
+        // nothing on screen is indistinguishable from a deadlock. Awaited
+        // inside the guard, so an async observer's rejection is contained too
+        // — an unhandled rejection would take the process down and with it the
+        // lease that is holding the workspace.
+        await options.onBlocked?.({
           workspace: canonicalWorkspace,
           attempts,
           recorded: persisted?.source ?? null,
@@ -733,6 +752,12 @@ export class TaskStore {
       attempts += 1;
       persisted = await this.#persistContainment(canonicalWorkspace, fence);
     }
+    // A fence file fences everyone by itself, so a lock that never became a
+    // marker goes back to being an ordinary lock — keeping it would strand the
+    // workspace behind a lock that names no containment once the operator
+    // clears the fence.
+    const held = this.workspaceLocks.get(canonicalWorkspace);
+    if (persisted.source === "fence" && held && held.contained !== true) held.containing = false;
     return { ...fence, source: persisted.source, path: persisted.path };
   }
 

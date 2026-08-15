@@ -1077,7 +1077,7 @@ Agent Office 不保存、不读取、不转发任何 Codex / Claude 凭据。认
 
 ### `Workspace ... is fenced after an unproven stop`
 
-上一次运行结束时无法证明代理进程已经停止（取消或失败后 `interrupt` 没有返回"已停止"），工作区被隔离，任何新运行都会被拒绝。错误信息里直接给出**要删除的那个文件**，控制台"运行时"面板与 `/api/health` 的 `containment` 字段显示同一路径。
+上一次运行结束时无法证明代理进程已经停止——工作流里 `interrupt` 没有返回"已停止"，或串行运行中进程树在 SIGKILL 之后依然存活（`treeUnresponsive`）——工作区被隔离，任何新运行都会被拒绝。错误信息里直接给出**要删除的那个文件**，控制台"运行时"面板与 `/api/health` 的 `containment` 字段显示同一路径。
 
 隔离标记只有落在工作区内才算数——那是所有指向该工作区的配置都能看到的唯一位置：`<workspace>/.agent-office.fence`，或被转成隔离标记的 `<workspace>/.agent-office.lock`（此时它不再随运行结束删除，也不会被过期接管）。先确认那个代理确实已经停止（`ps`、Herdr 面板、`kill` 残留进程），再删除该文件。
 

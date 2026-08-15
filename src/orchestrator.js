@@ -133,13 +133,14 @@ export class Orchestrator {
   async #runRounds(taskId, { maxRounds, onEvent, signal, runId }) {
     let task = await this.store.loadTask(taskId);
     let cancelled = false;
+    let unproven = null;
 
     await this.store.updateTask(taskId, "run.started", (current) => {
       current.status = "running";
     }, { maxRounds, runId });
     onEvent({ type: "run.started", taskId, runId, maxRounds });
 
-    for (let round = 1; round <= maxRounds && !cancelled; round += 1) {
+    for (let round = 1; round <= maxRounds && !cancelled && !unproven; round += 1) {
       let attemptedTurn = false;
       onEvent({ type: "round.started", taskId, round });
 
@@ -187,6 +188,23 @@ export class Orchestrator {
             })
           });
         } catch (error) {
+          // A tree that outlived SIGKILL may still be writing in this
+          // workspace. Cancelled or failed, that is an unproven stop: no
+          // further turn may enter the workspace, and it has to be closed
+          // before this run releases its lease.
+          if (error?.details?.treeUnresponsive) {
+            await this.#recordFailure(taskId, agent.id, error);
+            onEvent({
+              type: "turn.failed",
+              taskId,
+              round,
+              agentId: agent.id,
+              error: error.message,
+              ...failureDetails(error)
+            });
+            unproven = { agentId: agent.id, error };
+            break;
+          }
           // A cancelled turn is a user decision, not an agent failure, so the
           // agent keeps its previous status and stays runnable on resume.
           if (isCancellation(error, signal)) {
@@ -239,6 +257,31 @@ export class Orchestrator {
         });
         break;
       }
+    }
+
+    if (unproven) {
+      // Blocks until a marker is on disk, which is the point: the lease is
+      // released as soon as this returns.
+      const fence = await this.store.pinWorkspaceFence(this.config.workspace, {
+        taskId,
+        nodeId: unproven.agentId,
+        reason: `Execution could not be proven stopped: ${unproven.error.message}`
+      }, {
+        onBlocked: (state) => onEvent({
+          type: "run.containment_blocked",
+          taskId,
+          runId,
+          workspace: state.workspace,
+          attempts: state.attempts
+        })
+      });
+      await this.store.updateTask(taskId, "run.failed", (current) => {
+        current.status = "failed";
+        current.failureReason = `${unproven.error.message}; workspace containment was recorded at ${fence.path}`;
+      }, { runId, agentId: unproven.agentId, containment: fence.path });
+      task = await this.store.loadTask(taskId);
+      onEvent({ type: "run.finished", taskId, runId, status: task.status, cancelled: false });
+      return task;
     }
 
     task = await this.store.loadTask(taskId);
