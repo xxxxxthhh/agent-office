@@ -792,12 +792,14 @@ test("a throwing observer cannot end the containment wait", async (context) => {
   // unhandled rejection and take the process (and its lease) down.
   const observers = [
     () => { throw new Error("observer exploded"); },
-    async () => { throw new Error("observer rejected"); }
+    async () => { throw new Error("observer rejected"); },
+    // A listener that never settles must not suspend containment either.
+    () => new Promise(() => {})
   ];
   const pinning = store.pinWorkspaceFence(workspace, { nodeId: "build" }, {
     onBlocked: () => {
       calls += 1;
-      return observers[calls % 2]();
+      return observers[calls % observers.length]();
     }
   });
   const pending = Symbol("pending");
@@ -944,7 +946,12 @@ test("a serial run whose process tree survives SIGKILL fences the workspace", as
   });
   const task = await orchestrator.createTask("a turn whose tree cannot be killed");
 
-  const finished = await orchestrator.runTask(task.id);
+  const finished = await orchestrator.runTask(task.id, {
+    // An observer that raises must not be able to skip the fencing.
+    onEvent: (event) => {
+      if (event.type === "turn.failed") throw new Error("observer exploded");
+    }
+  });
 
   // Nothing proved that tree stopped, so the workspace has to close before the
   // run releases its lease — the serial path used to record the failure and

@@ -193,16 +193,21 @@ export class Orchestrator {
           // further turn may enter the workspace, and it has to be closed
           // before this run releases its lease.
           if (error?.details?.treeUnresponsive) {
-            await this.#recordFailure(taskId, agent.id, error);
-            onEvent({
-              type: "turn.failed",
-              taskId,
-              round,
-              agentId: agent.id,
-              error: error.message,
-              ...failureDetails(error)
-            });
+            // Recorded before anything can throw, and the notification is
+            // best-effort: an observer that raises must not be able to skip
+            // the fencing below and hand the workspace to the next turn.
             unproven = { agentId: agent.id, error };
+            await this.#recordFailure(taskId, agent.id, error);
+            try {
+              onEvent({
+                type: "turn.failed",
+                taskId,
+                round,
+                agentId: agent.id,
+                error: error.message,
+                ...failureDetails(error)
+              });
+            } catch { /* observers cannot veto containment */ }
             break;
           }
           // A cancelled turn is a user decision, not an agent failure, so the

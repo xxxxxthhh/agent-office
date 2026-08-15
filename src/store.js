@@ -512,9 +512,14 @@ export class TaskStore {
       // workspace and then released the very lock just taken.
       const fenced = await this.readWorkspaceContainment(canonicalWorkspace);
       if (fenced) {
+        // Both cleanups are best-effort: what the caller must see is the
+        // containment, not whichever filesystem error tripped a cleanup. A
+        // lock left behind here holds no containment and goes stale normally.
         const current = await this.#assessLease(workspaceLock.path);
-        if (!current || current.runId === runId) await rm(workspaceLock.path, { force: true });
-        await rm(this.#leasePath(taskId), { force: true });
+        if (!current || current.runId === runId) {
+          await rm(workspaceLock.path, { force: true }).catch(() => {});
+        }
+        await rm(this.#leasePath(taskId), { force: true }).catch(() => {});
         throw new RunLeaseError(
           `Workspace ${canonicalWorkspace} was fenced after an unproven stop while this run was `
           + `acquiring it. Confirm the agent is stopped, then delete ${fenced.path}.`,
@@ -737,16 +742,18 @@ export class TaskStore {
     while (persisted?.source !== "fence" && persisted?.source !== "lock") {
       try {
         // Reported before the first wait: a run that stops returning with
-        // nothing on screen is indistinguishable from a deadlock. Awaited
-        // inside the guard, so an async observer's rejection is contained too
-        // — an unhandled rejection would take the process down and with it the
-        // lease that is holding the workspace.
-        await options.onBlocked?.({
+        // nothing on screen is indistinguishable from a deadlock. Never
+        // awaited — an observer that hangs would suspend containment itself —
+        // but an async one's rejection is swallowed here, because an unhandled
+        // rejection would take the process down and with it the lease that is
+        // holding the workspace.
+        const notified = options.onBlocked?.({
           workspace: canonicalWorkspace,
           attempts,
           recorded: persisted?.source ?? null,
           fence
         });
+        if (typeof notified?.then === "function") notified.then(undefined, () => {});
       } catch { /* an observer cannot veto containment */ }
       await sleep(this.containmentRetryMs);
       attempts += 1;
