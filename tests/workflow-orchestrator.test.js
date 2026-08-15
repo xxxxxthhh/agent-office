@@ -913,8 +913,10 @@ test("publishes the rework, not the commit prepared before the writer was reopen
     dispatch: async (entry) => entry,
     wait: async (handle) => {
       attempt += 1;
-      // The second attempt is the rework a reviewer asked for.
+      // The second attempt is the rework a reviewer asked for, and it deletes
+      // as well as writes: a deletion has to survive the re-prepare too.
       await writeFile(path.join(handle.workspace, "src", "answer.js"), `export const answer = ${attempt};\n`);
+      if (attempt > 1) await rm(path.join(handle.workspace, "src", "seed.js"));
       return {
         response: { summary: "built", status: "done", messages: [], artifacts: [], needsUser: false },
         tracePath: null
@@ -962,6 +964,7 @@ test("publishes the rework, not the commit prepared before the writer was reopen
   // The reviewer's change has to be what lands. Reusing the intent prepared
   // for the first attempt published attempt 1 and reported success.
   assert.equal(await readFile(path.join(root, "src", "answer.js"), "utf8"), "export const answer = 2;\n");
+  await assert.rejects(() => readFile(path.join(root, "src", "seed.js")), /ENOENT/);
   assert.equal(
     (await runProcess({ command: "git", args: ["rev-list", "--count", `${baseHead}..HEAD`], cwd: root })).stdout.trim(),
     "1",
