@@ -23,11 +23,23 @@ export function starterStateDir(workspace, { realpathSync = defaultRealpathSync 
   // Hash the canonical path so the same repository reached through a symlink
   // does not get a second, unrelated state directory.
   const canonical = realpathSync(path.resolve(workspace));
-  const base = process.env.XDG_STATE_HOME
-    ? path.resolve(process.env.XDG_STATE_HOME)
-    : path.join(os.homedir(), ".local", "state");
   const digest = createHash("sha256").update(canonical).digest("hex").slice(0, 8);
-  return path.join(base, "agent-office", `${path.basename(canonical) || "workspace"}-${digest}`);
+  const leaf = path.join("agent-office", `${path.basename(canonical) || "workspace"}-${digest}`);
+  const home = path.join(os.homedir(), ".local", "state");
+  const configured = process.env.XDG_STATE_HOME ? path.resolve(process.env.XDG_STATE_HOME) : null;
+  // An XDG_STATE_HOME pointing inside the workspace would generate exactly the
+  // configuration workflows reject, so it is not honoured for this.
+  if (configured && !isInside(canonical, configured)) return path.join(configured, leaf);
+  if (!isInside(canonical, home)) return path.join(home, leaf);
+  throw new ConfigError(
+    `Cannot place control state outside ${canonical}: both the home state directory and `
+    + "XDG_STATE_HOME resolve inside it. Set stateDir to an absolute path outside the workspace."
+  );
+}
+
+function isInside(parent, target) {
+  const relative = path.relative(parent, target);
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 export const STARTER_AGENTS = {

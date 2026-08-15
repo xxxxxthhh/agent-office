@@ -345,3 +345,80 @@ test("init rejects agent ids it would otherwise drop", async (context) => {
   });
   assert.match(deduped.stdout, /Agents: codex$/m);
 });
+
+test("--owner reassigns a two-agent example onto a single configured agent", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-owner-"));
+  const stateDir = `${workspace}-state`;
+  context.after(async () => {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  const configPath = path.join(workspace, "agent-office.json");
+  await writeFile(configPath, JSON.stringify({
+    version: 1,
+    workspace,
+    stateDir,
+    // What init writes on a machine that has one of the two provider CLIs.
+    agents: [{
+      id: "codex",
+      adapter: "mock",
+      role: "Implement.",
+      replies: [{ summary: "ok", status: "done", messages: [], artifacts: [], needsUser: false }]
+    }]
+  }));
+  const create = (extra) => runProcess({
+    command: process.execPath,
+    args: [
+      CLI_PATH, "workflow", "create",
+      "--config", configPath,
+      "--objective", "Run the shipped example with one agent.",
+      "--example", "process-review",
+      ...extra
+    ],
+    cwd: workspace,
+    timeoutMs: 30_000
+  });
+
+  await assert.rejects(() => create([]), (error) => {
+    assert.match(error.details.stderr, /references unknown agent "claude"/);
+    assert.match(error.details.stderr, /Configured agents: codex/);
+    assert.match(error.details.stderr, /--owner/);
+    return true;
+  });
+
+  const created = await create(["--owner", "codex"]);
+  assert.match(created.stdout.trim(), /^task-\d{8}-[a-f0-9]{8}$/);
+});
+
+test("workflow create refuses an ambiguous definition source", async (context) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-ambiguous-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const configPath = path.join(workspace, "agent-office.json");
+  await writeFile(configPath, JSON.stringify({
+    version: 1,
+    workspace,
+    stateDir: `${workspace}-state`,
+    agents: [{ id: "codex", adapter: "mock", role: "Implement." }]
+  }));
+
+  // Taking --example and ignoring --file would silently run something other
+  // than the file the caller named.
+  await assert.rejects(
+    () => runProcess({
+      command: process.execPath,
+      args: [
+        CLI_PATH, "workflow", "create",
+        "--config", configPath,
+        "--objective", "Ambiguous.",
+        "--file", path.join(workspace, "missing.json"),
+        "--example", "process-review"
+      ],
+      cwd: workspace,
+      timeoutMs: 30_000
+    }),
+    (error) => {
+      assert.match(error.details.stderr, /takes --file or --example, not both/);
+      return true;
+    }
+  );
+});

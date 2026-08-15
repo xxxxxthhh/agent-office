@@ -48,6 +48,14 @@ herdr --session agent-office server
 
 每个 Herdr 控制调用都带 `--session agent-office`，不会接管日常使用的默认 session。
 
+一台机器上只装了一个代理 CLI 时，`init` 生成的配置里也只有那一个代理，而随包 definition 写了两个 owner。此时可以显式改派：
+
+```bash
+agent-office workflow create --objective "..." --example process-review --owner codex
+```
+
+`--owner` 把 definition 里所有 `agent` 节点改派给指定代理（审查因此变成自审）。Agent Office 不会自动做这件事——改派是你的选择。
+
 ## 2. 定义 DAG
 
 工作流是 JSON。随包发布的 definition 可以直接用：`--example process-review`（本地 Process Runtime，任何仓库都能跑）或 `--example herdr-feature`（Herdr 常驻 session + `npm test`）。想改的话，复制 [workflow.process-review.json](../examples/workflow.process-review.json) 或 [workflow.herdr-feature.json](../examples/workflow.herdr-feature.json) 再传 `--file`。核心节点：
@@ -84,7 +92,7 @@ agent-office task show "$TASK_ID"
 运行到 gate 后状态是 `awaiting_input`：
 
 ```bash
-agent-office workflow approve "$TASK_ID" release-gate
+agent-office workflow approve "$TASK_ID" gate
 agent-office run "$TASK_ID"
 ```
 

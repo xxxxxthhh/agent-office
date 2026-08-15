@@ -48,7 +48,8 @@ export function normalizeWorkflowDefinition(raw, config) {
         // while a shipped definition may name two.
         throw new ConfigError(
           `Node "${id}" references unknown agent "${owner}". `
-          + `Configured agents: ${[...configuredAgents].join(", ") || "(none)"}`
+          + `Configured agents: ${[...configuredAgents].join(", ") || "(none)"}. `
+          + "Edit the definition, or reassign every agent node with: workflow create --owner <agent-id>"
         );
       }
     }

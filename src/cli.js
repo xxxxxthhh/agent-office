@@ -1,6 +1,7 @@
 import path from "node:path";
 import os from "node:os";
 import { execFile } from "node:child_process";
+import { rmSync } from "node:fs";
 import { access, constants, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { normalizeConfig, writeStarterConfig, STARTER_AGENTS } from "./config.js";
@@ -190,6 +191,16 @@ async function listWorkflowExamples() {
     .filter((name) => name.startsWith("workflow.") && name.endsWith(".json"))
     .map((name) => name.slice("workflow.".length, -".json".length))
     .sort();
+}
+
+function assignWorkflowOwner(definition, owner) {
+  const nodes = Array.isArray(definition.nodes) ? definition.nodes : [];
+  return {
+    ...definition,
+    nodes: nodes.map((node) => (
+      (node.type ?? "agent") === "agent" ? { ...node, owner } : node
+    ))
+  };
 }
 
 async function resolveWorkflowExample(name) {
@@ -434,7 +445,9 @@ async function workflowCommand(args, io) {
     const objective = takeOption(args, "--objective");
     const file = takeOption(args, "--file");
     const example = takeOption(args, "--example");
+    const owner = takeOption(args, "--owner");
     if (!objective) throw new Error("workflow create requires --objective");
+    if (file && example) throw new Error("workflow create takes --file or --example, not both");
     if (!file && !example) {
       throw new Error(
         `workflow create requires --file or --example. Packaged examples: ${(await listWorkflowExamples()).join(", ")}`
@@ -446,7 +459,13 @@ async function workflowCommand(args, io) {
     // find by hand.
     const definitionPath = example ? await resolveWorkflowExample(example) : path.resolve(file);
     const definition = JSON.parse(await readFile(definitionPath, "utf8"));
-    const task = await runtime.workflowOrchestrator.createWorkflow(objective, definition);
+    // Shipped definitions name two agents because that is the point of the
+    // product, but a machine with one provider CLI gets a config with one
+    // agent. Reassigning is the user's explicit choice, never implicit.
+    const task = await runtime.workflowOrchestrator.createWorkflow(
+      objective,
+      owner ? assignWorkflowOwner(definition, owner) : definition
+    );
     io.log(task.id);
     return 0;
   }
@@ -623,12 +642,21 @@ async function demoCommand(args, io, options = {}) {
       "utf8"
     );
     io.log(`Serving the offline demo team from ${root}`);
-    return serveCommand([
-      "--config", configPath,
-      "--open",
-      ...(host ? ["--host", host] : []),
-      ...(port ? ["--port", port] : [])
-    ], io, options);
+    // Nothing else will ever look at this directory again, and Ctrl+C is the
+    // documented way to stop the console.
+    const cleanup = () => rmSync(root, { recursive: true, force: true });
+    process.once("exit", cleanup);
+    try {
+      return await serveCommand([
+        "--config", configPath,
+        "--open",
+        ...(host ? ["--host", host] : []),
+        ...(port ? ["--port", port] : [])
+      ], io, options);
+    } finally {
+      process.off("exit", cleanup);
+      cleanup();
+    }
   }
   const workspace = await mkdtemp(path.join(os.tmpdir(), "agent-office-demo-"));
   const config = normalizeConfig(
@@ -852,7 +880,7 @@ Usage:
   agent-office task archive <task-id> [--config path]
   agent-office task unarchive <task-id> [--config path]
   agent-office task delete <task-id> --yes [--config path]
-  agent-office workflow create --objective "..." (--example NAME | --file workflow.json) [--config path]
+  agent-office workflow create --objective "..." (--example NAME | --file workflow.json) [--owner agent-id] [--config path]
   agent-office workflow approve <task-id> <node-id> [--config path]
   agent-office workflow retry <task-id> <node-id> [--config path]
   agent-office message send <task-id> --body "..." [--to agent|team] [--config path]

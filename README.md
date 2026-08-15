@@ -65,7 +65,7 @@ cd /path/to/your-project
 agent-office start
 ```
 
-`start` 会检查当前目录是否已有 `agent-office.json`；没有时先在终端请求确认，确认后生成默认 Codex + Claude 配置。随后它运行环境体检，只有配置中的代理都可用才启动控制台，并在服务监听成功后自动打开浏览器。macOS 上，如果当前进程没有显式的 `HTTP_PROXY` / `HTTPS_PROXY`，启动器会继承系统网络设置中的代理（例如 Clash Verge），供不直接读取 macOS 系统代理的无头 CLI 使用；`agents[].env` 仍可覆盖它。当前终端是服务的进程宿主，按 `Ctrl+C` 会安全停止控制台和它启动的运行。
+`start` 会检查当前目录是否已有 `agent-office.json`；没有时先在终端请求确认，确认后按 PATH 上实际找到的代理 CLI 生成配置（`--agents codex,claude` 可显式指定）。随后它运行环境体检，只有配置中的代理都可用才启动控制台，并在服务监听成功后自动打开浏览器。macOS 上，如果当前进程没有显式的 `HTTP_PROXY` / `HTTPS_PROXY`，启动器会继承系统网络设置中的代理（例如 Clash Verge），供不直接读取 macOS 系统代理的无头 CLI 使用；`agents[].env` 仍可覆盖它。当前终端是服务的进程宿主，按 `Ctrl+C` 会安全停止控制台和它启动的运行。
 
 在已经执行过 `agent-office init` 的项目中启动：
 
@@ -103,37 +103,37 @@ agent-office demo --dashboard
 
 ```bash
 cd /path/to/your-project
-/path/to/agent-office/bin/agent-office.js init
-/path/to/agent-office/bin/agent-office.js doctor
+agent-office init
+agent-office doctor
 ```
 
 创建任务：
 
 ```bash
-/path/to/agent-office/bin/agent-office.js task create \
+agent-office task create \
   --objective "实现健康检查端点，补齐测试，并由另一位代理审查"
 ```
 
 命令会输出任务 ID。用它启动协作：
 
 ```bash
-/path/to/agent-office/bin/agent-office.js run task-YYYYMMDD-xxxxxxxx --rounds 4
+agent-office run task-YYYYMMDD-xxxxxxxx --rounds 4
 ```
 
 查看任务、对话和参与者状态：
 
 ```bash
-/path/to/agent-office/bin/agent-office.js task show task-YYYYMMDD-xxxxxxxx
+agent-office task show task-YYYYMMDD-xxxxxxxx
 ```
 
 当代理等待决策时，回复整个团队或指定代理：
 
 ```bash
-/path/to/agent-office/bin/agent-office.js message send task-YYYYMMDD-xxxxxxxx \
+agent-office message send task-YYYYMMDD-xxxxxxxx \
   --to codex \
   --body "兼容范围确定为 Node.js 20+，继续实现"
 
-/path/to/agent-office/bin/agent-office.js run task-YYYYMMDD-xxxxxxxx
+agent-office run task-YYYYMMDD-xxxxxxxx
 ```
 
 真实运行会调用本机已经登录的 Codex 和 Claude Code，可能产生模型用量并修改目标工作区。默认配置不会使用任何绕过权限或沙箱的危险选项：
@@ -278,7 +278,7 @@ agent-office task show <task-id> [--json] [--config path]
 agent-office task archive <task-id> [--config path]
 agent-office task unarchive <task-id> [--config path]
 agent-office task delete <task-id> --yes [--config path]
-agent-office workflow create --objective "..." (--example NAME | --file workflow.json) [--config path]
+agent-office workflow create --objective "..." (--example NAME | --file workflow.json) [--owner agent-id] [--config path]
 agent-office workflow approve <task-id> <node-id> [--config path]
 agent-office workflow retry <task-id> <node-id> [--config path]
 agent-office message send <task-id> --body "..." [--to agent|team] [--config path]
