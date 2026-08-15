@@ -476,13 +476,22 @@ async function runTaskCommand(args, io) {
     // A failed task short-circuits on a plain rerun, so saying only "failed"
     // leaves the next step to guesswork.
     if (task.failureReason) io.error(task.failureReason);
-    io.error(
-      task.mode === "workflow"
-        ? `Rerunning alone will not retry it. Reopen the failed node first: `
-          + `agent-office workflow retry ${task.id} <node-id>`
-        : `Rerunning alone will not retry it. Send the agent a decision first: `
-          + `agent-office message send ${task.id} --body "..."`
-    );
+    if (task.mode === "workflow") {
+      const failed = Object.values(task.workflow?.nodes ?? {})
+        .filter((node) => node.status === "failed")
+        .map((node) => node.id);
+      io.error(
+        "Rerunning alone will not retry it. Reopen a failed node first:"
+        + (failed.length
+          ? failed.map((nodeId) => `\n  agent-office workflow retry ${task.id} ${nodeId}`).join("")
+          : ` agent-office workflow retry ${task.id} <node-id>`)
+      );
+    } else {
+      io.error(
+        "Rerunning alone will not retry it. Send the agent a decision first: "
+        + `agent-office message send ${task.id} --body "..."`
+      );
+    }
     return 1;
   }
   return 0;
