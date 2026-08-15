@@ -1,6 +1,6 @@
 # 将 `feature/herdr-runtime-dag` 合入 `main` 的清单
 
-状态：**集成完成并已推送 `integrate/herdr-runtime-dag`**（`origin/main` 是其祖先，可 fast-forward）。
+状态：**已合入 `main`**（2026-08-16 fast-forward 至 `97f1315`）。本清单转为历史记录。
 验收：`npm run check` 全绿。经过 0.4 的多轮评审后，本清单第 3 节的集成步骤全部完成；剩下的只有对外合并动作本身。
 
 日期：2026-08-13 立；集成状态最后核对于 2026-08-16。
@@ -46,7 +46,7 @@
 - [x] 按第 6 节改测试脚本和文档
 - [x] 跑第 7 节验收（`npm test` 与 `npm run check`；随后的评审轮次又补了回归用例，计数以当前分支为准）
 - [x] `bed9245`、`c7be59d` 已随集成分支进入历史，不再需要单独推 `origin/main`
-- [ ] 需要对外合入时再开 PR 或直接 fast-forward：`integrate/herdr-runtime-dag` → `main`
+- [x] fast-forward `integrate/herdr-runtime-dag` → `main`（2026-08-16，`a247e15..97f1315`，无冲突、无合并提交）
 
 ## 4. 共享文件：冲突 + 怎么留
 
