@@ -913,10 +913,16 @@ test("publishes the rework, not the commit prepared before the writer was reopen
     dispatch: async (entry) => entry,
     wait: async (handle) => {
       attempt += 1;
-      // The second attempt is the rework a reviewer asked for, and it deletes
-      // as well as writes: a deletion has to survive the re-prepare too.
+      // The second attempt is the rework a reviewer asked for. It deletes as
+      // well as writes: a baseline file it removes, and a file the first
+      // attempt introduced and it took back. Neither may reach the target.
       await writeFile(path.join(handle.workspace, "src", "answer.js"), `export const answer = ${attempt};\n`);
-      if (attempt > 1) await rm(path.join(handle.workspace, "src", "seed.js"));
+      if (attempt === 1) {
+        await writeFile(path.join(handle.workspace, "src", "scratch.js"), "export const scratch = true;\n");
+      } else {
+        await rm(path.join(handle.workspace, "src", "seed.js"));
+        await rm(path.join(handle.workspace, "src", "scratch.js"));
+      }
       return {
         response: { summary: "built", status: "done", messages: [], artifacts: [], needsUser: false },
         tracePath: null
@@ -965,6 +971,9 @@ test("publishes the rework, not the commit prepared before the writer was reopen
   // for the first attempt published attempt 1 and reported success.
   assert.equal(await readFile(path.join(root, "src", "answer.js"), "utf8"), "export const answer = 2;\n");
   await assert.rejects(() => readFile(path.join(root, "src", "seed.js")), /ENOENT/);
+  // Only in the first attempt's prepared commit, and taken back by the rework:
+  // publishing it would ship a file that exists in no attempt's final state.
+  await assert.rejects(() => readFile(path.join(root, "src", "scratch.js")), /ENOENT/);
   assert.equal(
     (await runProcess({ command: "git", args: ["rev-list", "--count", `${baseHead}..HEAD`], cwd: root })).stdout.trim(),
     "1",

@@ -82,61 +82,63 @@ Git 会自动合并、但仍是双方都改过、提交前必须人工看的文�
 
 运行时：
 
-- [ ] `src/execution-runtimes.js`
-- [ ] `src/workflow-definition.js`
-- [ ] `src/workflow-orchestrator.js`
-- [ ] `src/workspaces.js`
+- [x] `src/execution-runtimes.js`
+- [x] `src/workflow-definition.js`
+- [x] `src/workflow-orchestrator.js`
+- [x] `src/workspaces.js`
 
 测试与夹具：
 
-- [ ] `tests/execution-runtimes.test.js`
-- [ ] `tests/workflow-definition.test.js`
-- [ ] `tests/workflow-orchestrator.test.js`
-- [ ] `tests/workspaces.test.js`
-- [ ] `tests/fixtures/fake-herdr.js`
-- [ ] `tests/process.test.js`（feature 新增；和 main 已有 process 测试合并，不要盖掉监督器相关用例）
+- [x] `tests/execution-runtimes.test.js`
+- [x] `tests/workflow-definition.test.js`
+- [x] `tests/workflow-orchestrator.test.js`
+- [x] `tests/workspaces.test.js`
+- [x] `tests/fixtures/fake-herdr.js`
+- [x] `tests/process.test.js`（feature 新增；和 main 已有 process 测试合并，不要盖掉监督器相关用例）
 
 文档与示例：
 
-- [ ] `docs/workflows.zh-CN.md`
-- [ ] `docs/protocol.md` 里 feature 多出来的 workflow / Herdr 段落
-- [ ] `examples/workflow.herdr-feature.json`
+- [x] `docs/workflows.zh-CN.md`
+- [x] `docs/protocol.md` 里 feature 多出来的 workflow / Herdr 段落
+- [x] `examples/workflow.herdr-feature.json`
 
 ## 6. 集成时不要漏的语义点
 
-- [ ] `TaskStore` 构造和 `#withLock` 保持 main 的 leases 目录与 workspace lock；workflow 节点 lease 是任务快照里的字段，不是替换磁盘租约
-- [ ] `listTasks({ includeArchived })` 保留；feature 的无参 `listTasks()` 不要倒退
-- [ ] `normalizeConfig()` 同时校验 `retention` 和 `execution`
-- [ ] 默认 `stateDir`：main 仍兼容项目内 `.agent-office`；feature 文档写的是 `~/.local/state/agent-office/<hash>`。集成时明确哪一种是 init 默认，哪一种只是 workflow 的约束
-- [ ] Workflow 创建时拒绝「控制状态落在 executor workspace 内」如果那是 feature 的不变量，要在 main 的 init / store 路径上显式执行，不要只写在文档里
-- [ ] Dashboard 与 CLI 在任务 `mode === "workflow"` 和串行模式之间都能工作
-- [ ] `package.json` 的 `check` 继续跑监督器，并 `node --check` 新源文件
+- [x] `TaskStore` 构造和 `#withLock` 保持 main 的 leases 目录与 workspace lock；workflow 节点 lease 是任务快照里的字段，不是替换磁盘租约
+- [x] `listTasks({ includeArchived })` 保留；feature 的无参 `listTasks()` 不要倒退
+- [x] `normalizeConfig()` 同时校验 `retention` 和 `execution`
+- [x] 默认 `stateDir`：main 仍兼容项目内 `.agent-office`；feature 文档写的是 `~/.local/state/agent-office/<hash>`。集成时明确哪一种是 init 默认，哪一种只是 workflow 的约束
+- [x] Workflow 创建时拒绝「控制状态落在 executor workspace 内」如果那是 feature 的不变量，要在 main 的 init / store 路径上显式执行，不要只写在文档里
+- [x] Dashboard 与 CLI 在任务 `mode === "workflow"` 和串行模式之间都能工作
+- [x] `package.json` 的 `check` 继续跑监督器，并 `node --check` 新源文件
 
 ## 7. 验收
 
+下列各项已在 2026-08-16 于集成分支核对：`npm run check` 全绿；`init` / `doctor` / `task create|run|archive|unarchive|delete` / `workflow create|approve|retry` / worktree writer 与 ff-only 发布均在临时工作区实跑通过；`start`、`serve`、system proxy、fake-herdr 身份校验由对应测试覆盖。仅未勾选项是合并动作本身。
+
 现有回归（合入后必须仍过）：
 
-- [ ] `npm test`（即 `node tools/run-tests.mjs`）
-- [ ] `npm run check`
-- [ ] `agent-office start` / `serve` / `doctor`
-- [ ] 任务租约、workspace lock、Ctrl+C / 停止运行后锁释放
-- [ ] `task archive` / `unarchive` / `delete`
-- [ ] system proxy / 一键启动相关测试
+- [x] `npm test`（即 `node tools/run-tests.mjs`）
+- [x] `npm run check`
+- [x] `agent-office start` / `serve` / `doctor`
+- [x] 任务租约、workspace lock、Ctrl+C / 停止运行后锁释放
+- [x] `task archive` / `unarchive` / `delete`
+- [x] system proxy / 一键启动相关测试
 
 Feature 能力：
 
-- [ ] `tests/workflow-orchestrator.test.js` 及同批新测试在监督器下通过
-- [ ] `agent-office workflow create --file examples/workflow.herdr-feature.json`
-- [ ] `workflow approve` / `workflow retry` 后再 `run`
-- [ ] 只读节点可并行；唯一 writer 走隔离 worktree
-- [ ] HTTP approve / retry 与 dashboard 节点操作一致
-- [ ] 无 Herdr 时 `runtime: "process"` 仍能跑 workflow；有 Herdr 时 fake-herdr 夹具覆盖身份校验
+- [x] `tests/workflow-orchestrator.test.js` 及同批新测试在监督器下通过
+- [x] `agent-office workflow create --objective "..." --file examples/workflow.herdr-feature.json`
+- [x] `workflow approve` / `workflow retry` 后再 `run`
+- [x] 只读节点可并行；唯一 writer 走隔离 worktree
+- [x] HTTP approve / retry 与 dashboard 节点操作一致
+- [x] 无 Herdr 时 `runtime: "process"` 仍能跑 workflow；有 Herdr 时 fake-herdr 夹具覆盖身份校验
 
 文档：
 
-- [ ] README 同时描述串行 0.3 能力和 workflow / Herdr
-- [ ] `docs/user-manual.md` 或 `docs/workflows.zh-CN.md` 可独立走通 v2 操作
-- [ ] 不再把已删除的 `docs/getting-started.zh-CN.md` 当作主入口
+- [x] README 同时描述串行 0.3 能力和 workflow / Herdr
+- [x] `docs/user-manual.md` 或 `docs/workflows.zh-CN.md` 可独立走通 v2 操作
+- [x] 不再把已删除的 `docs/getting-started.zh-CN.md` 当作主入口
 
 ## 8. 当时的命令（只读对照）
 

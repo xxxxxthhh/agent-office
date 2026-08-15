@@ -229,9 +229,14 @@ export class WorkspaceManager {
         // above prove it, and publication blocks reopening, so it was never
         // published. Drop it and prepare one commit that contains the rework;
         // keeping it would publish exactly the work a reviewer sent back.
+        // --mixed, never --soft: a soft reset would leave the previous
+        // attempt's tree staged, and a file that attempt introduced and the
+        // rework took back would ride along into the commit even though it
+        // exists in neither the base nor the final worktree. Rebuilding the
+        // index from the base means only the paths staged below are published.
         await runProcess({
           command: "git",
-          args: ["reset", "--soft", baseHead],
+          args: ["reset", "--mixed", baseHead],
           cwd: sourceWorkspace,
           timeoutMs: 30_000
         });
