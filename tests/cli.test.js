@@ -437,12 +437,17 @@ test("generated state never lands inside the workspace, whatever XDG_STATE_HOME 
   // into it all describe the same unusable placement.
   const link = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-office-link-")), "state");
   await symlink(workspace, link);
-  for (const candidate of [workspace, path.join(workspace, ".state"), link]) {
+  // "..state" is a child of the workspace whose name merely starts like a
+  // traversal segment.
+  for (const candidate of [workspace, path.join(workspace, ".state"), path.join(workspace, "..state"), link]) {
     process.env.XDG_STATE_HOME = candidate;
     const stateDir = starterStateDir(workspace);
-    assert.ok(
-      path.relative(workspace, stateDir).startsWith(".."),
-      `state landed inside the workspace for XDG_STATE_HOME=${candidate}: ${stateDir}`
-    );
+    const relative = path.relative(workspace, stateDir);
+    // Checked the way the code has to check it: a path merely beginning with
+    // ".." can still be a child, which is the bug this case exists for.
+    const outside = relative === ".."
+      || relative.startsWith(`..${path.sep}`)
+      || path.isAbsolute(relative);
+    assert.ok(outside, `state landed inside the workspace for XDG_STATE_HOME=${candidate}: ${stateDir}`);
   }
 });

@@ -62,8 +62,10 @@ export function starterStateDir(workspace, { realpathSync = defaultRealpathSync 
 function isInside(parent, target) {
   const relative = path.relative(parent, target);
   // The workspace itself counts as inside: state written directly into it is
-  // exactly what a writing agent can reach.
-  return !relative.startsWith("..") && !path.isAbsolute(relative);
+  // exactly what a writing agent can reach. Only a real traversal segment
+  // means outside — a sibling directory named "..state" is not one.
+  const escapes = relative === ".." || relative.startsWith(`..${path.sep}`);
+  return !escapes && !path.isAbsolute(relative);
 }
 
 export const STARTER_AGENTS = {
