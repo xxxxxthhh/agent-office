@@ -1077,9 +1077,11 @@ Agent Office 不保存、不读取、不转发任何 Codex / Claude 凭据。认
 
 ### `Workspace ... is fenced after an unproven stop`
 
-上一次运行结束时无法证明代理进程已经停止（取消或失败后 `interrupt` 没有返回"已停止"），工作区被隔离，任何新运行都会被拒绝。错误信息里直接给出**要删除的那个文件**——隔离标记按可写性依次落在三处：`<workspace>/.agent-office.fence`、被转成隔离标记的 `<workspace>/.agent-office.lock`（此时它不再随运行结束删除，也不会被过期接管）、以及工作区不可写时的 `<stateDir>/containments/<digest>.json`。控制台"运行时"面板与 `/api/health` 的 `containment` 字段也会显示同一路径。
+上一次运行结束时无法证明代理进程已经停止（取消或失败后 `interrupt` 没有返回"已停止"），工作区被隔离，任何新运行都会被拒绝。错误信息里直接给出**要删除的那个文件**，控制台"运行时"面板与 `/api/health` 的 `containment` 字段显示同一路径。
 
-先确认那个代理确实已经停止（`ps`、Herdr 面板、`kill` 残留进程），再删除该文件。三处都无法写入时，运行不会返回：进程会持续重试并保持租约——活着的持有者本身就是隔离——磁盘恢复可写后自动落盘收尾。
+隔离标记只有落在工作区内才算数——那是所有指向该工作区的配置都能看到的唯一位置：`<workspace>/.agent-office.fence`，或被转成隔离标记的 `<workspace>/.agent-office.lock`（此时它不再随运行结束删除，也不会被过期接管）。先确认那个代理确实已经停止（`ps`、Herdr 面板、`kill` 残留进程），再删除该文件。
+
+工作区暂时不可写时，运行**不会返回**：它继续持有并续租工作区锁（活着的持有者本身就是隔离，对其它配置同样生效），按秒级间隔重试落盘，并持续发出 `workflow.containment_blocked` 事件；工作区恢复可写后自动落盘收尾。此期间还会在 `<stateDir>/containments/<digest>.json` 写一份记录，它只对共用同一 `stateDir` 的配置可见，作用是诊断与本配置侧的额外拦截，**不能**替代工作区内的标记。
 
 ### `Timed out waiting for state lock`
 

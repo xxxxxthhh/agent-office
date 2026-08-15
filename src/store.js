@@ -568,10 +568,11 @@ export class TaskStore {
           if (this.workspaceLocks.get(canonicalWorkspace) === workspaceLock) {
             this.workspaceLocks.delete(canonicalWorkspace);
           }
-          // A contained lock IS the fence for a run that could not prove its
-          // agent stopped; releasing it would reopen the workspace to a second
-          // writer. Only the operator may clear it.
-          if (workspaceLock.contained) return;
+          // A lock that carries (or is still trying to carry) containment IS
+          // the fence for a run that could not prove its agent stopped;
+          // releasing it would reopen the workspace to a second writer. Only
+          // the operator may clear it.
+          if (workspaceLock.contained || workspaceLock.containing) return;
           const currentWorkspace = await this.#assessLease(workspaceLock.path);
           // Never delete a lock that a later run already took over.
           if (!currentWorkspace || currentWorkspace.runId === runId) {
@@ -712,10 +713,22 @@ export class TaskStore {
     };
     let attempts = 1;
     let persisted = await this.#persistContainment(canonicalWorkspace, fence);
-    while (!persisted) {
-      // Reported before the first wait: a run that stops returning with nothing
-      // on screen is indistinguishable from a deadlock.
-      options.onBlocked?.({ workspace: canonicalWorkspace, attempts, fence });
+    // The state record is diagnostics, never an answer: a config with another
+    // stateDir cannot see it, and the workspace is exactly what has to be
+    // closed to every config. Only a marker inside the workspace ends the wait;
+    // until one takes, the held lock — refreshed all the while — is what keeps
+    // the workspace closed.
+    while (persisted?.source !== "fence" && persisted?.source !== "lock") {
+      try {
+        // Reported before the first wait: a run that stops returning with
+        // nothing on screen is indistinguishable from a deadlock.
+        options.onBlocked?.({
+          workspace: canonicalWorkspace,
+          attempts,
+          recorded: persisted?.source ?? null,
+          fence
+        });
+      } catch { /* an observer cannot veto containment */ }
       await sleep(this.containmentRetryMs);
       attempts += 1;
       persisted = await this.#persistContainment(canonicalWorkspace, fence);
@@ -765,9 +778,11 @@ export class TaskStore {
   async #containWorkspaceLock(canonicalWorkspace, fence) {
     const held = this.workspaceLocks.get(canonicalWorkspace);
     if (!held) return null;
-    // Flagged before the rewrite: a full or read-only disk is exactly how the
-    // fence write failed, and release() must not free the lock either way.
-    held.contained = true;
+    // Flagged before the rewrite: whether or not the marker lands, this lock
+    // may never be released — while it is unmarked the run is still holding
+    // and refreshing it, and that live lease is the only thing fencing configs
+    // that cannot see this stateDir.
+    held.containing = true;
     // Mutating the lease object the heartbeat captured is what keeps the marker
     // alive: refresh() rewrites `{...lease, heartbeatAt}` and would otherwise
     // erase it on the next tick. It also means a later heartbeat can still land
@@ -782,6 +797,10 @@ export class TaskStore {
         // next run would take over as soon as the heartbeat goes cold.
         const written = JSON.parse(await readFile(held.path, "utf8"));
         if (written.contained !== true || written.runId !== held.lease.runId) return null;
+        // Only now is the marker permanent on its own, and only now may the
+        // heartbeat stop: until this point the lock had to keep looking fresh,
+        // because a cold lock is a lock another config takes over.
+        held.contained = true;
         return held.path;
       } catch {
         return null;
