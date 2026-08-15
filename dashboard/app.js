@@ -433,8 +433,10 @@ function renderRunControls(task) {
 
 function renderArtifacts(task) {
   const artifacts = collectArtifacts(task);
+  // Serial agents self-report these paths and nothing verifies them, so calling
+  // them files claims more than the data supports.
   elements.artifactCount.textContent = artifacts.length
-    ? `${artifacts.length} 个文件`
+    ? `${artifacts.length} 条上报`
     : "尚无产物";
   elements.artifactList.replaceChildren();
   if (!artifacts.length) {

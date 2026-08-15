@@ -174,6 +174,15 @@ async function resolveStarterAgents(requested) {
     : { agents: Object.keys(STARTER_AGENTS), detected: false };
 }
 
+// A configured command may be a bare name to look up on PATH, or a path the
+// config author wrote relative to the workspace.
+async function commandResolvable(command, workspace) {
+  if (command.includes(path.sep)) {
+    return access(path.resolve(workspace, command), constants.X_OK).then(() => true, () => false);
+  }
+  return commandOnPath(command);
+}
+
 async function commandOnPath(command) {
   const entries = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
   for (const entry of entries) {
@@ -214,6 +223,20 @@ async function doctorCommand(args, io) {
       + `${row.tools.filter((tool) => tool.available).map((tool) => tool.label).join(", ") || "none"}`
     );
     for (const warning of row.warnings) io.log(`  ! ${warning}`);
+    // Capability discovery probes the provider CLIs it knows; a generic command
+    // agent is whatever the config names, and an unresolvable one only shows up
+    // as spawn ENOENT during the first turn.
+    if (row.command && !await commandResolvable(row.command, runtime.config.workspace)) {
+      io.log(`  ! command not found or not executable: ${row.command}`);
+    }
+  }
+  if (runtime.config.execution.runtime === "herdr") {
+    const herdr = runtime.config.execution.herdrCommand;
+    io.log(
+      await commandResolvable(herdr, runtime.config.workspace)
+        ? `✓ herdr runtime: ${herdr} (session ${runtime.config.execution.herdrSession})`
+        : `✗ herdr runtime: ${herdr} not found; agent nodes cannot start`
+    );
   }
   // Serial tasks run happily with control state inside the workspace; every
   // workflow command refuses it. Saying so here beats letting the first
@@ -282,6 +305,10 @@ async function taskCommand(args, io) {
     rejectExtraArgs(args);
     const task = await runtime.orchestrator.createTask(objective);
     io.log(task.id);
+    // Routing falls back to configured-but-unproven agents when no provider CLI
+    // answers. Staying silent about that turns into `spawn codex ENOENT` at the
+    // first turn, long after the useful moment to say so.
+    for (const warning of task.routing?.warnings ?? []) io.error(`! ${warning}`);
     return 0;
   }
 
