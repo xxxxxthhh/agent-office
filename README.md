@@ -1,5 +1,7 @@
 # Agent Office
 
+> **English summary.** Agent Office is a local-first orchestration layer for multiple coding agents. It lets Codex, Claude Code or any stdin/stdout model tool share one task's goal, workspace, messages and hand-off state, so they take turns implementing, reviewing, reworking and completing work like colleagues. It ships a runnable orchestration MVP and a local real-time console with no third-party runtime dependencies (Node.js 20+, built-ins only). Highlights: DAG workflows with fan-out/join, single-writer isolation via git worktrees with human approval before integration, a rework loop triggered by direct messages, capability-aware routing, atomic JSON task state with append-only event logs, and crash recovery. The rest of this README is in Chinese; `agent-office demo` runs the full loop offline without calling a model.
+
 Agent Office 是一个本地优先的多代理编排层。它让 Codex、Claude Code 或任意支持 stdin/stdout 的模型工具，围绕同一任务共享目标、工作区、消息和交接状态，像同事一样轮流实现、审查、返工并完成任务。
 
 当前版本包含可运行的编排 MVP 和本地实时控制台，不需要安装第三方运行时依赖。
